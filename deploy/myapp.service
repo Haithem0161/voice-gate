@@ -1,0 +1,27 @@
+[Unit]
+Description=My App Backend (Axum)
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=myapp
+Group=myapp
+WorkingDirectory=/opt/myapp
+ExecStart=/opt/myapp/backend
+Restart=always
+RestartSec=5
+
+# Environment
+Environment=RUST_LOG=backend=info
+Environment=HOST=0.0.0.0
+Environment=PORT=3000
+EnvironmentFile=/opt/myapp/.env
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/myapp
+
+[Install]
+WantedBy=multi-user.target
