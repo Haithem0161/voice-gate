@@ -1,13 +1,13 @@
 [Unit]
-Description=My App Backend (Axum)
+Description=Voice Gate Backend (Axum)
 After=network.target postgresql.service
 
 [Service]
 Type=simple
-User=myapp
-Group=myapp
-WorkingDirectory=/opt/myapp
-ExecStart=/opt/myapp/backend
+User=voice-gate
+Group=voice-gate
+WorkingDirectory=/opt/voice-gate
+ExecStart=/opt/voice-gate/backend
 Restart=always
 RestartSec=5
 
@@ -15,13 +15,13 @@ RestartSec=5
 Environment=RUST_LOG=backend=info
 Environment=HOST=0.0.0.0
 Environment=PORT=3000
-EnvironmentFile=/opt/myapp/.env
+EnvironmentFile=/opt/voice-gate/.env
 
 # Security hardening
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/opt/myapp
+ReadWritePaths=/opt/voice-gate
 
 [Install]
 WantedBy=multi-user.target

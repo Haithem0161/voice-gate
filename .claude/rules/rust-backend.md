@@ -30,7 +30,7 @@ See `.claude/rules/ddd.md` for the complete DDD layer rules and adding new domai
 
 ## Adding a New Domain (Checklist)
 See `.claude/rules/ddd.md` for the full 9-step checklist covering:
-1. Migration → 2. Entities → 3. Repository trait → 4. Repository impl → 5. Handlers → 6. AppState wiring → 7. OpenApi registration → 8. Verify → 9. Frontend codegen
+1. Migration → 2. Entities → 3. Repository trait → 4. Repository impl → 5. Handlers → 6. AppState wiring → 7. OpenApi registration → 8. Verify
 
 ## Handler Pattern (MANDATORY)
 Every handler function MUST follow this exact pattern. Based on Axum 0.8 conventions:
@@ -208,15 +208,13 @@ If you put `Json<T>` before other extractors, Axum will consume the body before 
 - The `#[tokio::main]` macro in `main.rs` sets up the async runtime
 
 ## tower-http Middleware
-The app uses three tower-http layers (order matters -- outermost processes first):
+The app uses two tower-http layers (order matters -- outermost processes first):
 ```rust
 let app = Router::new()
     // ... routes ...
-    .layer(cors)                     // CorsLayer -- must match frontend origin
     .layer(CompressionLayer::new())  // Gzip response compression
     .layer(TraceLayer::new_for_http()) // Request/response logging via tracing
     .with_state(state);
 ```
-- `CorsLayer`: configure `allow_origin` to match `FRONTEND_URL` from config
 - `TraceLayer::new_for_http()`: uses HTTP status code classification for span attributes
-- Layers are applied bottom-up: TraceLayer runs first, then Compression, then CORS
+- Layers are applied bottom-up: TraceLayer runs first, then Compression

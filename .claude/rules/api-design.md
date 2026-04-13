@@ -3,7 +3,6 @@ paths:
   - "**/presentation/routes/**"
   - "**/domain/entities/**"
   - "backend/src/main.rs"
-  - "frontend/orval.config.ts"
 ---
 
 # API Design & OpenAPI Documentation Rules
@@ -95,8 +94,7 @@ struct ApiDoc;
 
 **Forgetting this step means:**
 - The endpoint won't appear in Swagger UI at `/swagger-ui`
-- Orval won't generate TypeScript types or hooks for it
-- The frontend will have no typed API access to that endpoint
+- The OpenAPI spec won't include the endpoint
 
 ### Alternative: utoipa-axum OpenApiRouter
 For larger projects, consider using `utoipa-axum` which auto-collects routes:
@@ -138,7 +136,7 @@ This eliminates the need to manually register paths in `#[openapi(...)]`.
 ## Swagger UI
 - Available at: `http://localhost:3000/swagger-ui`
 - OpenAPI JSON spec: `http://localhost:3000/api-docs/openapi.json`
-- Always verify new endpoints appear in Swagger before regenerating Orval types
+- Always verify new endpoints appear in Swagger
 - Swagger UI is configured in `main.rs`:
   ```rust
   .merge(SwaggerUi::new("/swagger-ui")

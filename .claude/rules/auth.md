@@ -125,8 +125,3 @@ To document authenticated endpoints in Swagger:
 - Always validate token expiry (the `jsonwebtoken` crate does this by default via `Validation::default()`)
 - Return `401 Unauthorized` for missing/invalid tokens, `403 Forbidden` for valid token with insufficient permissions
 
-## Frontend Auth Integration
-When auth is wired up, the custom axios instance (`frontend/src/api/axios-instance.ts`) should:
-1. Attach the JWT as `Authorization: Bearer <token>` header on every request
-2. Handle 401 responses by redirecting to login or refreshing the token
-3. Store the token securely (prefer `httpOnly` cookies over `localStorage` for XSS protection)

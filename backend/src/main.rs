@@ -2,7 +2,6 @@ use axum::Router;
 use sqlx::postgres::PgPoolOptions;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tower_http::cors::{Any, CorsLayer};
 use tower_http::compression::CompressionLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -86,12 +85,6 @@ async fn main() {
         user_repo,
     };
 
-    // CORS configuration
-    let cors = CorsLayer::new()
-        .allow_origin(config.frontend_url.parse::<http::HeaderValue>().unwrap())
-        .allow_methods(Any)
-        .allow_headers(Any);
-
     // Build router from domain routers
     let api_router = Router::new()
         .merge(domains::health::presentation::routes::router())
@@ -105,7 +98,6 @@ async fn main() {
         .nest("/api", api_router)
         .with_state(state)
         .merge(swagger)
-        .layer(cors)
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http());
 

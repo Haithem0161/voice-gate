@@ -187,7 +187,6 @@ dependencies = [
  "axum-extra",
  "chrono",
  "dotenvy",
- "http",
  "jsonwebtoken",
  "serde",
  "serde_json",

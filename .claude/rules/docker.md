@@ -7,13 +7,12 @@ paths:
 
 # Docker Rules
 
-**Docker provides the PostgreSQL database. Backend and frontend run locally (not in Docker during development).**
+**Docker provides the PostgreSQL database. The backend runs locally (not in Docker during development).**
 
 ## Architecture
 - PostgreSQL runs in Docker via `docker-compose.yml`
 - Backend runs locally with `cargo watch -x run` (via `make backend`)
-- Frontend runs locally with `pnpm dev` (via `make frontend`)
-- `make dev` orchestrates: start DB -> run migrations -> start backend + frontend
+- `make dev` orchestrates: start DB -> run migrations -> start backend
 
 ## Allowed Commands
 - DO: `docker compose up -d postgres`, `docker compose down`, `docker compose restart`
@@ -31,10 +30,10 @@ paths:
 docker compose up -d postgres     # or: make db
 
 # View logs
-docker logs myapp-postgres --tail 100 -f
+docker logs voice-gate-postgres --tail 100 -f
 
 # Connect to database directly
-docker exec -it myapp-postgres psql -U postgres -d myapp_dev
+docker exec -it voice-gate-postgres psql -U postgres -d voice_gate_dev
 
 # Stop (preserves data in volume)
 docker compose down
@@ -50,15 +49,15 @@ docker compose down -v
 | Port | 5460 |
 | User | postgres |
 | Password | postgres |
-| Database | myapp_dev |
-| Container | myapp-postgres |
-| Volume | myapp-postgres-data |
+| Database | voice_gate_dev |
+| Container | voice-gate-postgres |
+| Volume | voice_gate_pgdata |
 
 ## Decision Trees
 
 **Database not starting:**
 1. Check if port 5460 is already in use: `ss -tlnp | grep 5460`
-2. Check container logs: `docker logs myapp-postgres`
+2. Check container logs: `docker logs voice-gate-postgres`
 3. If port conflict: stop whatever uses port 5460 or change port in `docker-compose.yml`
 
 **After changing docker-compose.yml:**
@@ -73,5 +72,4 @@ docker compose down -v
 ## Production Dockerfile (deploy/Dockerfile)
 - Multi-stage build: `rust:1.83-alpine` builder -> `alpine:3.21` runtime
 - Only the release binary goes into the final image, no source code
-- Frontend deploys separately to Cloudflare Pages (not in Docker)
 - Exposes port 3000

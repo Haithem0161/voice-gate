@@ -120,7 +120,6 @@ Then implement in this order:
    - Add entity schemas to `components(schemas(...))`
    - Add tag to `tags(...)`
 8. **Verify**: `cargo check`, `cargo clippy -- -D warnings`
-9. **Regenerate frontend types**: `make generate-api`
 
 ## Layer Dependency Violations (NEVER DO)
 

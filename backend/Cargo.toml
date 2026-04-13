@@ -27,7 +27,7 @@ utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
 utoipa-swagger-ui = { version = "9", features = ["axum"] }
 
 # Middleware
-tower-http = { version = "0.6", features = ["cors", "compression-gzip", "trace"] }
+tower-http = { version = "0.6", features = ["compression-gzip", "trace"] }
 tower = "0.5"
 
 # Auth
@@ -45,4 +45,3 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 thiserror = "2"
 async-trait = "0.1"
-http = "1"

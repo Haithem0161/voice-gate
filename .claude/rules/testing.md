@@ -13,7 +13,7 @@ paths:
 ### Test Location
 - Unit tests: inline in source files using `#[cfg(test)] mod tests { ... }`
 - Integration tests: `backend/tests/` directory
-- Test database: use `#[sqlx::test]` for automatic transaction rollback, or create a separate `myapp_test` database
+- Test database: use `#[sqlx::test]` for automatic transaction rollback, or create a separate `voice_gate_test` database
 
 ### Unit Test Pattern
 ```rust
@@ -67,47 +67,12 @@ Requires `DATABASE_URL` to be set and the database to be accessible.
 
 ### Running Backend Tests
 ```bash
-make test                                    # All backend + frontend tests
+make test                                    # All backend tests
 cd backend && cargo test                     # Backend only
 cd backend && cargo test -- --test-threads=1 # Sequential (if tests share state)
 cd backend && cargo test test_name           # Single test by name
 cd backend && cargo test -- --nocapture      # Show println! output
 ```
-
-## Frontend Testing
-
-### Current Approach
-- Type checking: `pnpm tsc --noEmit` (catches type errors without emitting)
-- Build verification: `pnpm build` (ensures everything compiles and bundles)
-- Linting: add ESLint if needed
-
-### When Tests Are Added (Vitest + React Testing Library)
-```tsx
-import { render, screen, waitFor } from '@testing-library/react'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import UserList from './UserList'
-
-const queryClient = new QueryClient({
-  defaultOptions: { queries: { retry: false } },
-})
-
-const wrapper = ({ children }) => (
-  <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
-)
-
-test('renders user list', async () => {
-  render(<UserList />, { wrapper })
-  await waitFor(() => {
-    expect(screen.getByText('Test User')).toBeInTheDocument()
-  })
-})
-```
-
-### What to Test on Frontend
-- Form validation (Zod schemas produce correct error messages)
-- Component rendering (loading, error, empty, and data states)
-- Route navigation (links go to correct paths)
-- API hook behavior (mock the axios instance, verify query keys)
 
 ## CI Pipeline (GitHub Actions)
 The CI pipeline in `.github/workflows/ci.yml` runs on every push/PR to `main`:
@@ -116,11 +81,6 @@ The CI pipeline in `.github/workflows/ci.yml` runs on every push/PR to `main`:
 1. `cargo check` -- compile-time verification (including SQLx queries)
 2. `cargo test` -- run all tests
 3. `cargo clippy -- -D warnings` -- ALL warnings treated as errors
-
-**Frontend job:**
-1. `pnpm install` -- install dependencies
-2. `pnpm tsc --noEmit` -- type checking
-3. `pnpm build` -- production build
 
 ### Clippy Rules
 - CI runs `cargo clippy -- -D warnings` -- any Clippy warning fails the build

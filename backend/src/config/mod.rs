@@ -3,7 +3,6 @@ pub struct Config {
     pub jwt_secret: String,
     pub host: String,
     pub port: u16,
-    pub frontend_url: String,
 }
 
 impl Config {
@@ -18,8 +17,6 @@ impl Config {
                 .unwrap_or_else(|_| "3000".to_string())
                 .parse()
                 .expect("PORT must be a valid number"),
-            frontend_url: std::env::var("FRONTEND_URL")
-                .unwrap_or_else(|_| "http://localhost:5173".to_string()),
         }
     }
 }
