@@ -1,0 +1,530 @@
+# Phase 1: Foundation Morph + Audio Passthrough
+
+**Goal:** Morph the repo from a Rust/Axum backend template into a Rust desktop binary crate, rewrite all project-level docs and rule files, scaffold the module tree, and prove a working mic → virtual-mic passthrough on Linux via PipeWire.
+
+**Dependencies:** None (this phase produces the scaffolding every later phase extends).
+**Complexity:** L
+
+---
+
+## Section 1: Module & File Changes
+
+### 1.1 Files to DELETE
+
+Remove outright. These are backend artifacts that have zero role in a desktop app.
+
+```
+backend/                              # entire directory (Axum app, domains, migrations, .sqlx, backend/.memory)
+docker-compose.yml
+deploy/Dockerfile
+deploy/voice-gate.service
+deploy/                               # directory itself after contents removed
+.env                                  # if it exists and references DATABASE_URL / JWT_SECRET
+.claude/rules/rust-backend.md
+.claude/rules/docker.md
+.claude/rules/api-design.md
+.claude/rules/auth.md
+.claude/rules/migrations.md
+.claude/rules/ddd.md
+```
+
+**Preserve before deletion:** move `backend/.memory/cursor.json` to `.memory/cursor.json` at the repo root first (telemetry continuity).
+
+### 1.2 Files to REWRITE from scratch
+
+| Path | New content summary |
+|------|---------------------|
+| `CLAUDE.md` | Desktop app principles; Context7 crate list re-enumerated (`cpal`, `ort`, `eframe`, `egui`, `rubato`, `hound`, `ringbuf`, `ndarray`, `dirs`, `thiserror`, `serde`, `toml`, `anyhow`, `tracing`, `which`, `pipewire`); file-path table replaces port map; fixture-WAV testing replaces curl testing; rule-file references updated; "No emojis" + commit-authorship rules kept verbatim. |
+| `Makefile` | Targets: `setup`, `models`, `dev`, `test`, `lint`, `release`, `package-linux`, `package-windows`, `clean`. Delete `db`, `migrate`, `backend`. |
+| `README.md` | VoiceGate overview, features, prerequisites, build & run, model sourcing, license. |
+| `.github/workflows/ci.yml` | Replace Postgres CI with a matrix `{ubuntu-latest, windows-latest}` × `{fmt --check, clippy -D warnings, test, build --release}`. Install `libasound2-dev`, `libpipewire-0.3-dev`, `pkg-config`, `libclang-dev` on Linux. Cache cargo registry + target. |
+| `.gitignore` | Add `models/*.onnx`, `models/tmp_model/`, `target/`, `*.bin`, `.env*`. |
+| `.claude/rules/testing.md` | Rewrite for Rust desktop: unit tests inline, integration tests in `tests/` reading fixture WAVs via `hound`, deterministic ORT session tests, embedding-vector snapshot tests with tolerance, no DB setup, `cargo test` only. |
+| `.claude/rules/planning.md` | **Keep most of it.** Prepend a "Desktop App Adaptation" header note that points at the 7-section phase-file template used by VoiceGate (Module & File Changes / Dependencies & Build Config / Types, Traits & Public API / Runtime Behavior / Cross-Platform & Resource Handling / Verification / PRD Gap Additions). |
+| `Cargo.toml` (new, at repo root) | Single binary crate; see §2 for exact dependencies. |
+
+### 1.3 Files to CREATE (new)
+
+**New rule files** (replace deleted backend rules):
+
+- `.claude/rules/rust-desktop.md`
+- `.claude/rules/audio-io.md`
+- `.claude/rules/ml-inference.md`
+- `.claude/rules/gui.md`
+- `.claude/rules/module-boundaries.md`
+- `.claude/rules/cross-platform.md`
+
+**New plan directory** (part of 1.2, already in progress — this file lives in it):
+
+- `docs/voicegate/roadmap.md`
+- `docs/voicegate/research.md`
+- `docs/voicegate/phase-01.md` through `phase-06.md`
+- `docs/voicegate/status.md`
+- `docs/voicegate/frontend-summary.md`
+
+**New source tree** (stubs + passthrough wiring only; no ML yet):
+
+```
+src/
+├── main.rs                    # clap CLI entry point — Phase 1 subcommands: `devices`, `run --passthrough`
+├── lib.rs                     # public module re-exports
+├── audio/
+│   ├── mod.rs
+│   ├── capture.rs             # cpal input stream, 32 ms frames, SPSC push
+│   ├── output.rs              # cpal output stream, SPSC pop
+│   ├── ring_buffer.rs         # ringbuf::HeapRb SPSC wrapper
+│   ├── resampler.rs           # stub (rubato wired up in Phase 2)
+│   └── virtual_mic.rs         # VirtualMic trait + Linux PwCliVirtualMic + Windows VbCableVirtualMic
+├── config/
+│   ├── mod.rs
+│   └── settings.rs            # Config::default + Config::load (partial; expanded in Phase 4)
+└── ml/
+    └── mod.rs                 # empty placeholder; fleshed out in Phase 2
+```
+
+**New scripts, assets, fixtures:**
+
+- `scripts/download_models.py` (empty placeholder, committed)
+- `scripts/export_ecapa.py` (empty placeholder, committed)
+- `scripts/setup_pipewire.sh` (executable, mirrors PRD Appendix C)
+- `models/.gitkeep`
+- `tests/fixtures/.gitkeep`
+- `assets/enrollment_passages.txt` (PRD Appendix A pangram passage)
+
+---
+
+## Section 2: Dependencies & Build Config
+
+New root `Cargo.toml` (replaces `backend/Cargo.toml`):
+
+```toml
+[package]
+name = "voicegate"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.83"
+
+[dependencies]
+# Audio I/O
+cpal = "0.15"
+rubato = "0.14"
+ringbuf = "0.4"
+
+# ML inference (unused in Phase 1, added now to pin versions once)
+ort = { version = "2", features = ["load-dynamic"] }
+ndarray = "0.15"
+
+# GUI (unused in Phase 1)
+eframe = "0.28"
+egui = "0.28"
+
+# Audio file I/O
+hound = "3.5"
+
+# Config + CLI
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+clap = { version = "4", features = ["derive"] }
+
+# Error / logging
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# Platform paths + executable lookup
+dirs = "5"
+which = "6"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+pipewire = { version = "0.8", optional = true }
+
+[features]
+default = []
+pipewire-native = ["pipewire"]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+```
+
+**Notes:**
+- Dependencies are pinned once in Phase 1 to avoid churn in later phases. Unused crates (`ort`, `ndarray`, `eframe`, `egui`, `hound`) are listed but not imported in Phase 1 source.
+- `pipewire-native` feature is **off** by default. Phase 1 uses `pw-cli` shell invocations via `std::process::Command`. The feature is exercised in Phase 6.
+- `rust-toolchain.toml` already pins 1.83 and is preserved.
+
+**ONNX Runtime shared library:**
+- Linux: `libonnxruntime.so` must be installed system-wide (`/usr/local/lib`). Installation is a prerequisite, not a build step (see README).
+- Windows: `onnxruntime.dll` next to the executable or on `PATH`.
+- The `load-dynamic` feature on `ort` means build does NOT fail if the shared library is missing; only runtime model loading does. This is acceptable for Phase 1 since Phase 1 doesn't load any ONNX models.
+
+---
+
+## Section 3: Types, Traits & Public API
+
+### 3.1 `src/audio/ring_buffer.rs`
+
+```rust
+use ringbuf::{traits::*, HeapRb};
+
+pub type AudioProducer = <HeapRb<f32> as Split>::Prod;
+pub type AudioConsumer = <HeapRb<f32> as Split>::Cons;
+
+pub fn new_audio_ring(capacity_samples: usize) -> (AudioProducer, AudioConsumer) {
+    HeapRb::<f32>::new(capacity_samples).split()
+}
+```
+
+- Capacity for the input ring and output ring is **3 seconds × 48 000 Hz = 144 000 samples** each (≈ 576 KB per queue).
+
+### 3.2 `src/audio/capture.rs`
+
+```rust
+pub struct CaptureStream {
+    _stream: cpal::Stream,  // kept alive so the callback keeps firing
+    pub device_name: String,
+    pub sample_rate: u32,
+}
+
+pub fn start_capture(
+    device_name: Option<&str>,
+    producer: AudioProducer,
+) -> anyhow::Result<CaptureStream>;
+```
+
+- Selects the named cpal input device or falls back to `default_input_device()`.
+- Negotiates `StreamConfig { channels: 1, sample_rate: 48000, buffer_size: Fixed(1536) }`; on `StreamConfigNotSupported`, retries with `BufferSize::Default`.
+- On stereo-only devices, downmixes L+R in the callback via averaging.
+
+### 3.3 `src/audio/output.rs`
+
+```rust
+pub struct OutputStream {
+    _stream: cpal::Stream,
+    pub device_name: String,
+}
+
+pub fn start_output(
+    device_name: &str,
+    consumer: AudioConsumer,
+) -> anyhow::Result<OutputStream>;
+```
+
+- Looks up the named cpal output device by display name (`voicegate_sink` on Linux, `CABLE Input (VB-Audio Virtual Cable)` on Windows).
+
+### 3.4 `src/audio/virtual_mic.rs`
+
+```rust
+pub trait VirtualMic: Send {
+    /// Set up the virtual microphone. Returns the cpal output device name to write to.
+    fn setup(&mut self) -> anyhow::Result<String>;
+    /// Tear down on exit. Must be idempotent.
+    fn teardown(&mut self) -> anyhow::Result<()>;
+    /// Human-readable name Discord should select as input.
+    fn discord_device_name(&self) -> &str;
+}
+
+pub fn create_virtual_mic() -> Box<dyn VirtualMic>;
+
+#[cfg(target_os = "linux")]
+pub struct PwCliVirtualMic { /* tracks whether setup completed */ }
+
+#[cfg(target_os = "windows")]
+pub struct VbCableVirtualMic { /* detection state */ }
+```
+
+- `create_virtual_mic()` returns the appropriate impl via `#[cfg(target_os)]`.
+- On Linux, `PwCliVirtualMic::setup()` shells out to `pw-cli create-node adapter ...` and `pw-link ...` per PRD Appendix C.
+- On Windows, `VbCableVirtualMic::setup()` scans cpal output devices for `"CABLE Input (VB-Audio Virtual Cable)"`. If missing, returns an `anyhow::Error` with the install link.
+- `teardown()` on Linux runs `pw-cli destroy-node voicegate_sink` and `pw-cli destroy-node voicegate_mic`.
+
+### 3.5 `src/audio/resampler.rs` (stub)
+
+```rust
+/// Placeholder — flesh out in Phase 2.
+pub struct Resampler48to16;
+
+impl Resampler48to16 {
+    pub fn new() -> Self { Self }
+}
+```
+
+### 3.6 `src/config/settings.rs` (partial — only `[audio]` section in Phase 1)
+
+```rust
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Config {
+    pub audio: AudioConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AudioConfig {
+    pub input_device: String,     // "default" or a specific device name
+    pub output_device: String,    // "auto" or a specific name
+
+    /// Frame size in milliseconds. Matches PRD §5.9 TOML key `frame_size_ms`.
+    /// **HARD-CODED to 32** in v1 — see §6.2 and Decision D-001 (research.md).
+    /// Non-default values are REJECTED at load time because Silero VAD requires
+    /// exactly 512 samples @ 16 kHz, which only aligns at 32 ms frames.
+    pub frame_size_ms: u32,
+
+    pub sample_rate: u32,         // always 48000 in v1
+}
+
+impl AudioConfig {
+    /// Derived constant: `frame_size_ms * sample_rate / 1000`. For the v1 values
+    /// 32 ms × 48 000 Hz this is exactly 1536. Callers should use this helper
+    /// instead of recomputing, and use it as an assertion when building cpal
+    /// stream configs.
+    pub fn frame_size_samples(&self) -> usize {
+        (self.frame_size_ms as usize) * (self.sample_rate as usize) / 1000
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            audio: AudioConfig {
+                input_device: "default".into(),
+                output_device: "auto".into(),
+                frame_size_ms: 32,
+                sample_rate: 48000,
+            },
+        }
+    }
+}
+
+impl Config {
+    /// Validate that user-provided config values are in the supported set.
+    /// Called by `Config::load()` after deserializing. Returns an error that
+    /// surfaces cleanly to the CLI/GUI, not a panic.
+    pub fn validate(&self) -> Result<(), VoiceGateError> {
+        if self.audio.frame_size_ms != 32 {
+            return Err(VoiceGateError::Config(format!(
+                "audio.frame_size_ms = {} is not supported. Only 32 is valid in v1 \
+                 (Silero VAD requires 512 samples at 16 kHz, which only aligns at 32 ms).",
+                self.audio.frame_size_ms
+            )));
+        }
+        if self.audio.sample_rate != 48000 {
+            return Err(VoiceGateError::Config(format!(
+                "audio.sample_rate = {} is not supported. Only 48000 is valid in v1.",
+                self.audio.sample_rate
+            )));
+        }
+        Ok(())
+    }
+}
+
+impl Config {
+    pub fn load() -> anyhow::Result<Self>;       // dirs::config_dir()/voicegate/config.toml, falls back to Default
+    pub fn save(&self) -> anyhow::Result<()>;
+}
+```
+
+### 3.7 `src/main.rs`
+
+```rust
+#[derive(Parser)]
+#[command(name = "voicegate", version)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// List cpal input and output devices.
+    Devices,
+    /// Run the pipeline. In Phase 1, only --passthrough is wired up.
+    Run {
+        /// Passthrough mode: mic → virtual mic with no ML. Phase 1 default.
+        #[arg(long)]
+        passthrough: bool,
+    },
+}
+```
+
+### 3.8 Error types
+
+A single top-level `thiserror` enum in `src/lib.rs`:
+
+```rust
+#[derive(Debug, thiserror::Error)]
+pub enum VoiceGateError {
+    #[error("audio device error: {0}")]
+    Audio(String),
+
+    #[error("virtual microphone setup failed: {0}")]
+    VirtualMic(String),
+
+    #[error("configuration error: {0}")]
+    Config(String),
+}
+```
+
+Handler surface uses `anyhow::Result<T>`; boundaries convert to `VoiceGateError`. Later phases extend with `Ml`, `Enrollment`, `Gate` variants.
+
+---
+
+## Section 4: Runtime Behavior
+
+### 4.1 `voicegate devices`
+
+1. `cpal::default_host()`
+2. Enumerate `host.input_devices()?` and `host.output_devices()?`
+3. Print each device's `.name()?` with an "IN" or "OUT" prefix.
+4. Mark the default devices with `(default)`.
+5. Return 0.
+
+### 4.2 `voicegate run --passthrough`
+
+**Startup sequence (main thread):**
+
+1. `tracing_subscriber::fmt::init()`
+2. `Config::load()` — may return `Default` if no config exists yet.
+3. `let mut vmic = create_virtual_mic();`
+4. `let output_device_name = vmic.setup()?;`
+   - Linux: shells out to `pw-cli` to create `voicegate_sink` + `voicegate_mic` + link. Returns `"voicegate_sink"`.
+   - Windows: scans for VB-Cable. Returns `"CABLE Input (VB-Audio Virtual Cable)"`.
+5. Allocate two ring buffers (input + output), each 144 000 samples capacity.
+6. `let capture = start_capture(&config.audio.input_device, input_producer)?;`
+7. Spawn the passthrough worker thread (see 4.3).
+8. `let output = start_output(&output_device_name, output_consumer)?;`
+9. Install Ctrl-C handler that flips a shared `AtomicBool` shutdown signal.
+10. Main thread parks on a condvar until shutdown is signaled.
+11. Drop streams (stops callbacks).
+12. `vmic.teardown()?;`
+13. Exit 0.
+
+### 4.3 Passthrough worker thread (Phase 1 only — no ML)
+
+```
+loop {
+    if shutdown.load(Relaxed) { break; }
+
+    // Pop up to 1536 samples from the input ring (blocking wait if empty).
+    let mut frame = [0.0f32; 1536];
+    let n = input_consumer.pop_slice(&mut frame);
+    if n == 0 {
+        std::hint::spin_loop();
+        continue;
+    }
+
+    // Push the same frame to the output ring (Phase 1: identity).
+    output_producer.push_slice(&frame[..n]);
+}
+```
+
+**Real-time constraints:**
+
+- **Input callback MUST NOT allocate.** Just `push_slice` into the ring.
+- **Output callback MUST NOT allocate.** Just `pop_slice` from the ring.
+- **Worker thread is allowed to allocate** between frames but should pre-allocate the `[f32; 1536]` scratch buffer once and reuse it (stack-allocated here).
+- **No `println!` / `tracing::info!` inside any callback.** Worker thread logging is allowed at `debug` level only.
+
+### 4.4 ALSA variable-callback handling
+
+If `BufferSize::Fixed(1536)` is rejected, the capture callback is called with arbitrary sizes (e.g. 480, 960, 2048). The callback simply `push_slice`s everything into the ring, and the worker pops in fixed 1536-sample chunks. The ring's 3-second capacity absorbs jitter.
+
+### 4.5 Shutdown cleanliness
+
+- Linux `teardown()` MUST destroy `voicegate_sink` and `voicegate_mic`. If the process is killed with SIGKILL, the nodes leak; document this as a known limitation and add a note in README that `pw-cli list-objects | grep voicegate` + manual destroy is the recovery.
+- Windows `teardown()` is a no-op (VB-Cable is persistent).
+
+---
+
+## Section 5: Cross-Platform & Resource Handling
+
+### 5.1 `#[cfg(target_os)]` split points
+
+| File | Split |
+|------|-------|
+| `src/audio/virtual_mic.rs` | Linux uses `PwCliVirtualMic`; Windows uses `VbCableVirtualMic`. macOS is `unimplemented!()`. |
+| `src/audio/capture.rs` | None — cpal handles WASAPI vs ALSA transparently. |
+| `src/audio/output.rs` | None. |
+
+### 5.2 File path resolution
+
+- Config: `dirs::config_dir()?.join("voicegate/config.toml")`
+- Profile (Phase 3): `dirs::data_dir()?.join("voicegate/profile.bin")`
+- Models: relative to the executable (`models/silero_vad.onnx`, etc.) for dev; final packaging (Phase 6) embeds in the AppImage/MSI.
+
+### 5.3 Error surfaces
+
+- **Linux, no PipeWire:** `which pw-cli` fails → error "`pw-cli` not found. VoiceGate requires PipeWire on Linux. See README.md." (PulseAudio fallback is Phase 6.)
+- **Windows, no VB-Cable:** device scan empty → error "`CABLE Input (VB-Audio Virtual Cable)` not found. Install from https://vb-audio.com/Cable/ and reboot."
+- **Permission denied on mic:** cpal surfaces this via `DefaultStreamConfigError`. Wrap with "Microphone access denied. On Linux, check `pactl list short sources` and PipeWire permissions. On Windows, Settings → Privacy → Microphone."
+
+### 5.4 Graceful device disconnect
+
+Out of scope for Phase 1 (not in PRD §13 success criteria, and reconnect logic is complex). Document as a known limitation: if the mic is unplugged, the process exits with an error. Phase 6 may revisit.
+
+---
+
+## Section 6: Verification
+
+**Every step must pass before Phase 1 is considered complete.**
+
+### Automated checks
+
+1. `cargo check` compiles cleanly on Linux.
+2. `cargo clippy -- -D warnings` is clean.
+3. `cargo fmt --check` is clean.
+4. `cargo build --release` produces `target/release/voicegate`.
+5. `grep -riE 'sqlx|axum|utoipa|postgres|diesel|jwt' CLAUDE.md .claude/rules/ src/` returns **zero** matches. This catches backend-idiom residue in rewritten files.
+6. Directory listing `ls .claude/rules/` matches exactly: `audio-io.md cross-platform.md gui.md ml-inference.md module-boundaries.md planning.md rust-desktop.md testing.md`. None of the deleted files remain.
+
+### Manual smoke tests (Linux)
+
+7. `./scripts/setup_pipewire.sh` succeeds; `pw-cli list-objects | grep voicegate` shows both `voicegate_sink` and `voicegate_mic`. Afterwards, run the reverse destroy commands from PRD Appendix C to clean up; the automated path below must handle setup itself.
+8. `cargo run --release -- devices` prints both input and output device lists with at least one entry each.
+9. `cargo run --release -- run --passthrough` starts without error.
+10. With `voicegate run --passthrough` running: open any recorder (e.g. `gnome-sound-recorder` or `pw-cat --record -`), select `voicegate_mic` as the input source, speak into the physical mic. The recording must contain the spoken audio unchanged.
+11. Ctrl-C exits cleanly. After exit, `pw-cli list-objects | grep voicegate` returns **empty**.
+
+### Manual smoke tests (Windows)
+
+12. With VB-Cable installed, `voicegate.exe devices` lists `CABLE Input (VB-Audio Virtual Cable)` among outputs.
+13. `voicegate.exe run --passthrough` runs. Audacity or Discord, configured to read `CABLE Output (VB-Audio Virtual Cable)`, receives the spoken audio.
+14. Ctrl-C exits cleanly.
+
+### Acceptance thresholds
+
+- Passthrough audio must be **bit-for-bit identical** to the input (Phase 1 applies no processing). Verify by routing a WAV file through the system via a loopback cable or `pw-cat` and byte-comparing a 5-second capture.
+- No audible glitches, dropouts, or xruns over a 30-second test.
+
+---
+
+## Section 6+: PRD Gap Additions
+
+### 6.2 Config key `audio.frame_size_ms` naming + validation (Pass 2, G-011, MEDIUM)
+
+**Gap:** PRD §5.9 specifies the TOML key as `frame_size_ms = 32`. The Phase 1 draft originally defined the Rust field as `frame_size_samples: usize` with value 1536, creating a unit mismatch at the serde boundary — the TOML file would be parsed into a field named `frame_size_samples` (or rename-annotated), but executors reading the PRD schema would write `frame_size_ms = 32` and hit a parse error or wrong value.
+
+**Resolution (applied above in §3.6):**
+
+1. **The struct field is `frame_size_ms: u32`**, matching the PRD TOML key exactly. No `#[serde(rename)]` needed.
+2. **A helper method `frame_size_samples(&self) -> usize`** derives the sample count on demand (`frame_size_ms * sample_rate / 1000`). For v1 this is always 1536.
+3. **`Config::validate()` rejects any value other than `frame_size_ms == 32`** at load time with a clear error message. Rationale: Silero VAD requires exactly 512 samples at 16 kHz, which only aligns at 32 ms frames per Decision D-001. Exposing the key as user-tunable but rejecting non-32 values at validation time keeps the TOML schema consistent with the PRD while preventing silent breakage.
+4. **Same treatment for `sample_rate`**: validated to be exactly 48000.
+
+**Why not hard-code and remove from config:** Leaving the keys in the TOML schema preserves PRD §5.9 compatibility and keeps the door open for future versions that might support 24 ms frames (if Silero is re-trained) or 44.1 kHz devices (if we add a pre-capture resample). Hard-coding them out would lock those futures out.
+
+### 6.1 ONNX Runtime install documentation (Pass 1, G-003, LOW)
+
+**Gap:** PRD §9.1 details the ONNX Runtime install steps but Phase 1 doesn't call them out explicitly even though Phase 1 owns the README rewrite.
+
+**Addition:** When Phase 1 rewrites `README.md`, the "Prerequisites" section must include both platform install paths verbatim:
+
+- **Linux:**
+  ```bash
+  wget https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-linux-x64-1.17.0.tgz
+  tar xzf onnxruntime-linux-x64-1.17.0.tgz
+  sudo cp onnxruntime-linux-x64-1.17.0/lib/libonnxruntime.so* /usr/local/lib/
+  sudo ldconfig
+  ```
+- **Windows:** Download `onnxruntime.dll` from the same release page; place next to `voicegate.exe` or on `PATH`.
+
+Phase 1 itself does NOT load any ONNX models (`ort` uses `load-dynamic`, so missing `libonnxruntime.so` causes a deferred runtime error, not a build error). Verification of a working ONNX Runtime install happens in Phase 2 when `SileroVad::load` runs for the first time.

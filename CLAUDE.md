@@ -89,7 +89,7 @@ Architecture details, patterns, and conventions are in `.claude/rules/`:
 - `ddd.md` -- DDD layering and domain structure
 
 <!-- MEMORY:START -->
-# voice-gate
+# fullstack-rust-react
 
 _Last updated: 2026-04-13 | 0 active memories, 0 total_
 
