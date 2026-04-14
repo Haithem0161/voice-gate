@@ -1,14 +1,14 @@
 # VoiceGate Status Tracker
 
-**Last updated:** 2026-04-14 (Phase 1 structurally complete; manual mic smoke test deferred)
-**Overall status:** Phase 1 commits (6) shipped. Automated gate PASS. Manual mic-to-Discord smoke test DEFERRED to Phase 2 due to G-015 (cpal 0.15 ALSA i16/44100 vs 48k f32 gap) and G-016 (cpal 0.15 cannot target PipeWire `voicegate_sink` node by name). Both gaps are Phase 2's responsibility to resolve. Also discovered and fixed in-pass: G-014 (pw-cli create-node broken on PipeWire 1.0.x; replaced with pw-loopback).
+**Last updated:** 2026-04-14 (Phase 2 complete with load-bearing discrimination test PASSING)
+**Overall status:** Phases 1 and 2 complete. Phase 2's load-bearing gate passed with huge margin: `test_embedding_discrimination` reports cosine(speaker_a, speaker_b) = 0.018 vs a < 0.5 threshold, validating D-002R (WeSpeaker ResNet34-LM as primary speaker embedding model). 43/43 tests pass across all suites (32 lib + 9 ml integration + 2 ort smoke). Three new gaps discovered and FIXED in-pass during Phase 2 execution (G-017 ORT version 1.17 -> 1.22, G-018 WeSpeaker needs Kaldi fbank features not raw audio, G-019 Silero v5 needs a 64-sample context buffer prepended to each input chunk). Phase 1's G-015 and G-016 remain deferred to Phase 4 (they are pipeline-integration concerns, not ML-primitive concerns).
 
 ## Phase Status Table
 
 | # | Phase | Status | Started | Completed | New Modules | New Tests | New Crates | CLI/GUI Surface Added |
 |---|-------|--------|---------|-----------|-------------|-----------|------------|------------------------|
 | 1 | Foundation Morph + Audio Passthrough | structurally complete (manual gate partial) | 2026-04-14 | 2026-04-14 | 11/11 | 6/0 | 17/16 (+ ctrlc via `cargo add`) | `devices`, `run --passthrough` |
-| 2 | ML Inference Primitives | not started | — | — | 0/4 | 0/10 | 0/0 | none |
+| 2 | ML Inference Primitives | complete (all 43 tests pass, discrimination cos = 0.018) | 2026-04-14 | 2026-04-14 | 5/4 (+ fbank) | 35/10 (fbank 8 + resampler 4 + embedding 5 + similarity 9 + vad integration 3 + discrimination 3 + math 3) | 18/16 (+ realfft via `cargo add`) | none |
 | 3 | Enrollment + CLI | not started | — | — | 0/3 | 0/8 | 0/1 | `enroll --wav`, `enroll --mic`, `enroll --list-passages` |
 | 4 | Gate + Pipeline Integration | not started | — | — | 0/4 | 0/11 | 0/0 | `run --headless` |
 | 5 | GUI | not started | — | — | 0/4 | 0/1 | 0/1 | `run` (default → GUI), main screen, enrollment wizard |
@@ -89,9 +89,22 @@ Per-pass summary with counts and category breakdown. Updated after each pass.
 - **Status:** G-014 resolved in step 7 of Phase 1 execution. G-015 and G-016 documented as Phase 2 work items.
 - **Report:** [PHASE-1-VERIFICATION.md](PHASE-1-VERIFICATION.md).
 
-### Pass 4+ — Continue until 0 true gaps
+### Pass 4 — Execution discovery (2026-04-14, Phase 2 runtime testing)
 
-Target: ≤4 passes total. Each pass appends subsections to affected phase files (6.1, 6.2, ...).
+- **Date:** 2026-04-14
+- **Method:** Running the Phase 2 integration test suite against real ONNX models and real LibriSpeech fixtures. Not a pre-execution audit; gaps found by executing `cargo test --test test_ml -- --nocapture --test-threads=1` and reading the real session errors.
+- **Gaps found:** 3 (all HIGH, all FIXED in-pass). Plus **D-002R validated** via the load-bearing discrimination test.
+- **Absorbed into:**
+  - phase-01.md §6.1 (corrected) + README.md — **G-017 (HIGH, FIXED)**: The pinned `ort = "=2.0.0-rc.10"` crate requires ONNX Runtime 1.22.x, not 1.17.0 as Phase 1 cited. The first ort `Session::builder` call panics with "expected 1.22.x, but got 1.17.0". Re-installed 1.22.0 (the latest 1.22 release that ships a Linux x64 tarball — 1.22.1 and 1.22.2 are NuGet-only patch releases). Code lands in commit `0f806dc`.
+  - phase-02.md §§1.1, 3.3, 3.6, 4.2 + new `src/ml/fbank.rs` — **G-018 (HIGH, FIXED)**: WeSpeaker's ONNX accepts `f32[B, T, 80]` Kaldi fbank features, not raw `[1, T]` audio. The ort smoke test caught this at step 5 of Phase 2 execution. Wrote a pure-Rust `FbankExtractor` matching `torchaudio.compliance.kaldi.fbank` with WeSpeaker's exact settings (80 Mel bins, 25 ms frame, 10 ms shift, Hamming window, preemphasis 0.97, CMN, `waveform * (1 << 15)` pre-scale). `realfft 3.5.0` promoted from transitive to direct dep. Code lands in commit `3ea9365`.
+  - phase-02.md + `src/ml/vad.rs` — **G-019 (HIGH, FIXED)**: Silero VAD v5 expects `[1, 576]` input = 64 context samples from the previous call + 512 new samples. Initial implementation fed `[1, 512]` and got ~0 probability on ALL inputs. Reference is `silero-vad/src/silero_vad/utils_vad.py::OnnxWrapper::__call__`. Added a `context: [f32; 64]` field to `SileroVad`; each `prob()` call prepends the context, runs the session, saves the last 64 samples of the concatenated input as the new context. After the fix, `test_vad_detects_speech` reports 264/309 chunks (85%) above 0.5 on 10 s of LibriSpeech speech. Code lands in commit `3c3fffe`.
+- **Also resolved:** Q-001 (the ECAPA ONNX export question) is **closed** as superseded by D-002R. Phase 2 proved that D-002R's WeSpeaker path works end-to-end.
+- **Distribution:** 3 HIGH, all fixed. 0 deferred.
+- **Report:** [PHASE-2-VERIFICATION.md](PHASE-2-VERIFICATION.md).
+
+### Pass 5+ — Continue until 0 true gaps
+
+Target: ≤5 passes total. Each pass appends subsections to affected phase files (6.1, 6.2, ...).
 
 ### Verification Pass — Final
 
