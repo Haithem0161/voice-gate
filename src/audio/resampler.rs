@@ -96,6 +96,69 @@ impl Resampler48to16 {
     }
 }
 
+/// Resampler from an arbitrary capture rate to 48 kHz. Used when the
+/// capture device's native rate is not 48000 (e.g. 44100 on many ALSA
+/// devices behind PipeWire). Wraps `rubato::FftFixedIn` with a variable
+/// input accumulator since the capture callback delivers chunks of
+/// arbitrary size.
+pub struct CaptureResampler {
+    inner: FftFixedIn<f32>,
+    chunk_size: usize,
+    accum: Vec<f32>,
+    output_scratch: Vec<Vec<f32>>,
+}
+
+impl CaptureResampler {
+    pub fn new(from_rate: u32, to_rate: u32) -> anyhow::Result<Self> {
+        if from_rate == to_rate {
+            anyhow::bail!(
+                "CaptureResampler: from_rate == to_rate ({from_rate}), no resampling needed"
+            );
+        }
+        // Use a chunk size that gives ~32ms at the input rate
+        let chunk_size = (from_rate as usize * 32) / 1000; // e.g. 1411 for 44100
+        let inner = FftFixedIn::<f32>::new(
+            from_rate as usize,
+            to_rate as usize,
+            chunk_size,
+            SUB_CHUNKS,
+            1,
+        )
+        .map_err(|e| VoiceGateError::Audio(format!("CaptureResampler FftFixedIn::new: {e}")))?;
+
+        // Ask rubato for the actual max output size it needs
+        let max_output = inner.output_frames_max();
+        let output_scratch = vec![vec![0.0f32; max_output]];
+
+        Ok(Self {
+            inner,
+            chunk_size,
+            accum: Vec::with_capacity(chunk_size * 2),
+            output_scratch,
+        })
+    }
+
+    /// Push samples at the capture rate and return resampled 48 kHz samples.
+    /// May return an empty slice if not enough input has accumulated yet.
+    pub fn process(&mut self, input: &[f32], output: &mut Vec<f32>) -> anyhow::Result<()> {
+        self.accum.extend_from_slice(input);
+
+        while self.accum.len() >= self.chunk_size {
+            let chunk: Vec<f32> = self.accum.drain(..self.chunk_size).collect();
+            let input_channels: [&[f32]; 1] = [&chunk];
+
+            let (_, written) = self
+                .inner
+                .process_into_buffer(&input_channels, &mut self.output_scratch, None)
+                .map_err(|e| anyhow::anyhow!("CaptureResampler process: {e}"))?;
+
+            output.extend_from_slice(&self.output_scratch[0][..written]);
+        }
+
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
