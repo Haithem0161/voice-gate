@@ -1,9 +1,11 @@
 # Phase 2: ML Inference Primitives
 
-**Goal:** Load Silero VAD and ECAPA-TDNN ONNX models, extract speaker embeddings from audio, and prove that two different speakers produce distinguishable embeddings (cosine similarity < 0.5) on real fixture WAVs. This phase contains the single biggest technical risk in the project.
+**Goal:** Load Silero VAD and WeSpeaker ResNet34 ONNX models, extract 256-dimensional speaker embeddings from audio, and prove that two different speakers produce distinguishable embeddings (cosine similarity < 0.5) on real fixture WAVs. This phase contains the single biggest technical risk in the project.
 
 **Dependencies:** Phase 1 (source tree, Cargo.toml, ring buffer, capture stub).
 **Complexity:** M
+
+> **Note on model choice (D-002R, 2026-04-14):** This phase originally called for exporting SpeechBrain ECAPA-TDNN from PyTorch via our own script, with WeSpeaker ResNet34 as a fallback. The decision was flipped proactively before implementation started; we now use WeSpeaker ResNet34's pre-exported ONNX as the **primary** embedding model. The embedding dimension is **256**, not 192. No Python model-build pipeline is required. See `research.md` §3 and D-002R in the decisions log for the full rationale.
 
 ---
 
@@ -15,16 +17,18 @@
 
 ```
 src/ml/vad.rs               # Silero VAD wrapper with persistent GRU state
-src/ml/embedding.rs         # ECAPA-TDNN wrapper, L2 normalization, sliding window buffer
+src/ml/embedding.rs         # WeSpeaker ResNet34 wrapper, L2 normalization, sliding window buffer
 src/ml/similarity.rs        # cosine_similarity + SpeakerVerifier (EMA smoothing)
 ```
 
-**Python scripts:**
+**Shell scripts:**
 
 ```
-scripts/download_models.py  # downloads silero_vad.onnx from the official release
-scripts/export_ecapa.py     # exports SpeechBrain ECAPA-TDNN to ONNX with equivalence check
+scripts/download_models.sh  # downloads silero_vad.onnx and wespeaker_resnet34.onnx via curl + sha256
+scripts/download_fixtures.sh # downloads LibriSpeech samples, synthesizes silence/noise via ffmpeg
 ```
+
+Note: `scripts/download_models.py` and `scripts/export_ecapa.py` stubs created in Phase 1 are removed. D-002R eliminates the Python model build pipeline entirely.
 
 **Test fixtures** (binary WAV files, not checked in unless small; see 1.3):
 
@@ -48,8 +52,8 @@ tests/test_ml.rs            # loads fixtures via hound, runs the full suite (see
 |------|--------|
 | `src/audio/resampler.rs` | Replace the Phase 1 stub with a real `rubato::FftFixedIn<f32>` wrapper (48 kHz → 16 kHz, 1536-sample input → 512-sample output). |
 | `src/ml/mod.rs` | Add `pub mod vad; pub mod embedding; pub mod similarity;` |
-| `src/lib.rs` | Re-export `ml::{vad, embedding, similarity}` and extend `VoiceGateError` with `Ml(String)` variant. |
-| `Makefile` | Add a real `models:` target that runs both Python scripts. |
+| `src/lib.rs` | Extend `VoiceGateError` with `Ml(String)`, `ModelNotFound(String)`, and `OrtUnavailable` variants. |
+| `Makefile` | Real `models:` target runs `scripts/download_models.sh`. Real `fixtures:` target runs `scripts/download_fixtures.sh`. |
 
 ### 1.3 Fixture WAV sourcing
 
@@ -65,26 +69,17 @@ Default to the download-script path so the repo stays lean. `scripts/download_fi
 
 **No new Rust crates** — `ort`, `ndarray`, `hound`, `rubato` were all pinned in Phase 1's `Cargo.toml`. Phase 2 only imports them.
 
-**Python dependencies (model export environment):**
+**No Python dependencies.** D-002R eliminated the Python model-build pipeline. Both ONNX models are downloaded pre-built from their upstream project releases via a bash script that uses `curl` + `sha256sum`. The only non-Rust tools Phase 2 needs are: `curl`, `sha256sum`, `tar` (standard on any Linux/macOS developer machine), and `ffmpeg` (for fixture synthesis -- silence and noise WAVs).
 
-```
-pip install speechbrain==1.0.* torch==2.* onnx==1.16.* onnxruntime==1.17.* numpy
-```
-
-Document this in `README.md` under a "Model export" section. The Python environment is **only required for contributors regenerating models**; end users download the pre-exported ONNX files from a release artifact.
-
-**ONNX Runtime shared library** is a runtime prerequisite, not a build-time prerequisite (the `load-dynamic` feature on `ort` defers loading until the first session create). Installation instructions are in Phase 1's README rewrite; Phase 2 only documents them further for clarity.
+**ONNX Runtime shared library** is a runtime prerequisite, not a build-time prerequisite (the `load-dynamic` feature on `ort` defers loading until the first session create). Installation instructions are in Phase 1's README rewrite; Phase 2 only documents them further for clarity and verifies via the integration tests that the runtime is actually reachable.
 
 **`Makefile` targets:**
 
 ```makefile
-models: models/silero_vad.onnx models/ecapa_tdnn.onnx
+models: models/silero_vad.onnx models/wespeaker_resnet34.onnx
 
-models/silero_vad.onnx:
-	python scripts/download_models.py
-
-models/ecapa_tdnn.onnx:
-	python scripts/export_ecapa.py --output models/ecapa_tdnn.onnx
+models/silero_vad.onnx models/wespeaker_resnet34.onnx:
+	bash scripts/download_models.sh
 
 fixtures:
 	bash scripts/download_fixtures.sh
@@ -149,13 +144,19 @@ impl SileroVad {
 ### 3.3 `src/ml/embedding.rs`
 
 ```rust
-pub const EMBEDDING_DIM: usize = 192;
+/// 256-dimensional speaker embedding (WeSpeaker ResNet34 per D-002R).
+pub const EMBEDDING_DIM: usize = 256;
 pub const MIN_WINDOW_SAMPLES_16K: usize = 8_000;   // 0.5 s @ 16 kHz
 pub const MAX_WINDOW_SAMPLES_16K: usize = 24_000;  // 1.5 s @ 16 kHz
 pub const REEXTRACT_INTERVAL_SAMPLES_16K: usize = 3_200;  // 200 ms @ 16 kHz
 
+/// Named `EcapaTdnn` for historical reasons -- the trait/struct stayed the
+/// same after the D-002R decision flipped the backing model to WeSpeaker
+/// ResNet34. Rename to `SpeakerEmbedder` or similar is a Phase 6 cleanup.
 pub struct EcapaTdnn {
     session: ort::Session,
+    input_name: String,   // resolved at load time, not hard-coded
+    output_name: String,  // resolved at load time, not hard-coded
 }
 
 impl EcapaTdnn {
@@ -252,11 +253,11 @@ OrtUnavailable,
 
 **Allocations per call:** one temporary input tensor per session run. ort lets us avoid reallocation by holding pre-built `Value` handles, but the first implementation allocates per call for simplicity. If profiling (Phase 4 verification) shows this as a hot spot, we optimize then.
 
-### 4.2 ECAPA-TDNN call sequence (per 200 ms extraction trigger)
+### 4.2 WeSpeaker embedding call sequence (per 200 ms extraction trigger)
 
 1. Worker thread checks `embedding_window.should_extract()`.
 2. If true, call `ecapa.extract(embedding_window.snapshot())` on the current window contents.
-3. `extract()` builds a `[1, N]` f32 tensor, runs the session, reads `[1, 192]` output, L2-normalizes, returns.
+3. `extract()` builds a `[1, N]` f32 tensor under the input tensor name resolved at load time, runs the session, reads the output tensor (shape `[1, 256]`) under the output name resolved at load time, L2-normalizes into a fresh `Vec<f32>`, returns.
 4. Caller passes the result to `SpeakerVerifier::update()`.
 5. `embedding_window.mark_extracted()` resets the interval counter.
 
@@ -292,7 +293,7 @@ With `ema_alpha = 0.3`, a single outlier moves `current` by 30% of the delta. Fi
 
 - `SileroVad::load` and `EcapaTdnn::load` are called **once** at app startup by the worker thread.
 - Sessions are owned by the worker thread and never shared across threads (simpler than `Arc` and we don't need parallel inference).
-- Model paths resolved via: CLI override → config → executable-relative `models/{silero_vad,ecapa_tdnn}.onnx`.
+- Model paths resolved via: CLI override → config → executable-relative `models/{silero_vad.onnx,wespeaker_resnet34.onnx}`.
 
 ---
 
@@ -319,26 +320,26 @@ fn resolve_model_path(name: &str) -> anyhow::Result<PathBuf> {
 
 Integration tests in `tests/test_ml.rs` use `env!("CARGO_MANIFEST_DIR")` to resolve fixture paths. This works regardless of where `cargo test` is invoked from.
 
-### 5.4 Python export script portability
+### 5.4 Model download script portability
 
-- `scripts/export_ecapa.py` uses `speechbrain.inference.speaker.EncoderClassifier.from_hparams(source="speechbrain/spkrec-ecapa-voxceleb")`, which downloads to a local cache.
-- Works on Linux, Windows, macOS — pure Python.
-- **The script runs on the contributor's machine, not in CI**. Phase 2's Makefile target assumes a local Python env. Phase 6 publishes the exported ONNX as a release artifact so end users never run the export themselves.
+- `scripts/download_models.sh` is bash-only with `curl` + `sha256sum` + `tar`. No Python. No `python3-venv`. No dependency resolution. On macOS `sha256sum` may be absent and `shasum -a 256` is used instead; the script probes for both.
+- Runs on Linux, macOS, and Windows-under-WSL/MSYS. Windows native users run the same script via Git Bash or WSL.
+- **The script runs on the contributor's or end-user's machine**, not in CI. Phase 6 will publish the downloaded ONNX files as a release artifact so end users never have to run `make models` themselves, but during Phase 2 development it is the only way to obtain the models.
 
 ### 5.5 Fixture licensing
 
-LibriSpeech is CC BY 4.0; re-distribution is allowed with attribution. `scripts/download_fixtures.sh` downloads from the official OpenSLR mirror at runtime, so the repo itself never ships the audio data.
+LibriSpeech is CC BY 4.0; re-distribution is allowed with attribution. `scripts/download_fixtures.sh` downloads from the official OpenSLR mirror at runtime, so the repo itself never ships the audio data. Silence and noise fixtures are synthesized locally via `ffmpeg -f anullsrc` and `ffmpeg -f lavfi -i anoisesrc` and therefore carry no licensing burden.
 
 ---
 
 ## Section 6: Verification
 
-**This is the CRITICAL RISK GATE for the entire project.** If the discrimination test fails, we do not proceed to Phase 3; we execute Decision D-002 (WeSpeaker fallback) inside this phase.
+**This is the CRITICAL RISK GATE for the entire project.** If the discrimination test fails, we do not proceed to Phase 3; we stop and escalate (D-002R made WeSpeaker the proactive primary, so there is no further fallback -- a WeSpeaker discrimination failure would mean a fundamental model-quality issue, not an engineering issue).
 
 ### Pre-test setup
 
-1. `make models` completes successfully, producing `models/silero_vad.onnx` (~2 MB) and `models/ecapa_tdnn.onnx` (~80 MB).
-2. `scripts/export_ecapa.py` runs the PyTorch ↔ ONNX equivalence check and asserts `max(|pytorch_out - onnx_out|) < 1e-4` on a fixed seed dummy input. If this fails, the script exits non-zero and must be debugged before the Rust side is touched.
+1. `make models` completes successfully, producing `models/silero_vad.onnx` (~2 MB) and `models/wespeaker_resnet34.onnx` (~25 MB). The download script verifies SHA-256 checksums on both files before declaring success.
+2. A minimal ort smoke test confirms both ONNX files can be loaded into an `ort::Session` on this machine. This verifies the ONNX Runtime shared library is reachable at runtime via `load-dynamic`. If loading fails, the remaining gate items are not runnable and Phase 2 is blocked.
 3. `make fixtures` populates `tests/fixtures/` with all 5 WAV files.
 
 ### Automated tests (`cargo test --test test_ml`)
@@ -357,14 +358,14 @@ LibriSpeech is CC BY 4.0; re-distribution is allowed with attribution. `scripts/
 12. **`test_embedding_self_similarity`** — Extract from `speaker_a.wav` and `speaker_a_enroll.wav` (same speaker, different content). Assert cosine > 0.65. This is looser than `consistency` because the content differs.
 13. **`test_embedding_window_lifecycle`** — Push chunks into an `EmbeddingWindow`, verify `should_extract()` transitions, `snapshot` returns the expected slice, `mark_extracted` resets the counter.
 
-### Fallback decision gate
+### Discrimination failure escalation (D-002R: no further fallback)
 
-14. If **any** of tests 10/11/12 fails despite the Python equivalence check passing:
+14. If **any** of tests 10/11/12 fails:
     1. Document the failure in this file's §6+ with the exact cosine values observed.
-    2. Switch `scripts/download_models.py` to download `wespeaker_resnet34.onnx` from https://github.com/wenet-e2e/wespeaker releases.
-    3. Update `EMBEDDING_DIM` to 256 in `src/ml/embedding.rs`.
-    4. Re-run tests 10/11/12.
-    5. If WeSpeaker **also** fails, the project is blocked on a model-quality issue, not an engineering issue. Stop Phase 2 and escalate.
+    2. Confirm the input tensor name and shape resolved at load time match the WeSpeaker ONNX (some releases use `feats`, others `input`; our code resolves this dynamically via `session.inputs()`, but regression is possible).
+    3. Confirm that the audio passed to `extract()` is mono 16 kHz f32 with length in `[MIN_WINDOW_SAMPLES_16K, MAX_WINDOW_SAMPLES_16K]`.
+    4. Confirm L2 normalization is actually applied to both vectors before `cosine_similarity`.
+    5. If all of the above check out and discrimination is still < the plan's acceptance threshold, escalate: the project is blocked on a model-quality issue, not an engineering issue. D-002R already made WeSpeaker primary -- there is no further fallback. A failure here would mean revisiting the architecture choice (different model family, or training a custom model), which is out of Phase 2's scope.
 
 ### Lint / build
 

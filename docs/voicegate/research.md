@@ -41,25 +41,37 @@ Domain research and design decisions that inform the phase plans. Update this fi
 **Decisions:**
 - **Decision D-001 (2026-04-13):** Use 32 ms / 1536-sample frames end-to-end (capture, ring buffer, resampler, VAD, embedding window accumulation, gate) to align with Silero VAD input. Rationale: alternative (30 ms) forces awkward VAD windowing; alternative (20 ms) requires buffering two frames per VAD call. Source: PRD §5.4.
 
-## 3. ECAPA-TDNN (Speaker Embedding)
+## 3. Speaker Embedding (WeSpeaker ResNet34, previously ECAPA-TDNN)
 
-**Source:** https://huggingface.co/speechbrain/spkrec-ecapa-voxceleb
-**Training data:** VoxCeleb1+2
-**Model size:** ~80 MB (ONNX after export)
-**Output:** 192-dimensional speaker embedding, expected to be L2-normalized by the caller.
+**Primary source (as of 2026-04-14, D-002 revised):** https://github.com/wenet-e2e/wespeaker — the maintainers publish pre-exported ONNX files directly on the releases page. Phase 2 uses `wespeaker_voxceleb_resnet34.onnx` (search the WeSpeaker "Pretrained Models" page for the exact release asset name; the file is ~25 MB).
 
-**Export path:**
-- Upstream is a PyTorch model published by SpeechBrain, not a pre-made ONNX file. Export is done via `torch.onnx.export` with opset 14 and a dynamic `audio_length` axis.
-- PRD §7.2 explicitly warns the SpeechBrain model may be wrapped in additional layers. The correct subgraph to export is `classifier.mods.embedding_model`, but verification is required.
-- **Mandatory:** `scripts/export_ecapa.py` must include a PyTorch ↔ ONNX equivalence check asserting `max(|pytorch_out - onnx_out|) < 1e-4` on a fixed dummy input. If this check fails, we're exporting the wrong submodule.
+**Training data:** VoxCeleb1+2 (same as SpeechBrain ECAPA-TDNN).
+**Architecture:** ResNet-34 backbone with a temporal pooling head, trained with angular margin loss.
+**Model size:** ~25 MB ONNX.
+**Output:** **256-dimensional** speaker embedding (NOT 192). L2-normalization is still performed by the caller, not the model.
 
-**Fallback model (WeSpeaker):**
-- https://github.com/wenet-e2e/wespeaker publishes official ONNX exports of speaker verification models (`voxceleb_resnet34.onnx` and similar).
-- WeSpeaker's embedding dim is 256, not 192. Any code path that assumes 192 must go through a constant in `src/ml/embedding.rs`, not a hard-coded literal, so the fallback is a one-line change.
+### Why we do not export SpeechBrain ECAPA-TDNN ourselves
 
-**Decisions:**
-- **Decision D-002 (2026-04-13):** Primary model is SpeechBrain ECAPA-TDNN exported via our script. Fallback is WeSpeaker ResNet34 pre-exported ONNX. Fallback decision is made **inside Phase 2** based on the discrimination test, not deferred to a later phase. Rationale: discovering failure in Phase 4 forces rewind through Phase 3 (enrollment re-verification).
-- **Decision D-003 (2026-04-13):** Embedding dimension is a `const EMBEDDING_DIM: usize` in `src/ml/embedding.rs`, not a literal. Profile.bin stores the dim in its header so a profile from a different model is safely rejected by `Profile::load`.
+The Phase 2 plan originally called for exporting SpeechBrain's ECAPA-TDNN via `torch.onnx.export` and verifying with a PyTorch/ONNX equivalence check. That path has three problems:
+
+1. **Q-001 (the biggest one):** PRD §7.2 warns that SpeechBrain may wrap the embedding network in additional layers, and `torch.onnx.export` against the wrong submodule produces an ONNX that runs silently but returns garbage embeddings. The `max(|pytorch_out - onnx_out|) < 1e-4` equivalence check catches the case where the export is broken relative to the live PyTorch graph, but it does NOT catch the case where we traced the wrong submodule (because we'd be comparing the wrong graph to itself).
+2. **Heavy contributor dependency chain:** running the export requires `speechbrain + torch 2.x + onnx + onnxruntime + numpy` in a Python venv, which is ~2.5 GB of wheels and pulls in CUDA-adjacent metadata even on CPU-only builds. That is a serious barrier for anyone building VoiceGate from source.
+3. **Product vs research:** VoiceGate is a desktop product, not a research reproducibility artifact. The upstream maintainers of WeSpeaker have already solved the export problem and publish binary ONNX releases. Consuming their output is simpler and less error-prone than reproducing their work with a different toolchain.
+
+ResNet-34 and ECAPA-TDNN are in the same accuracy tier on VoxCeleb (both achieve sub-1% EER on the VoxCeleb1-O test set). ResNet is very slightly slower per frame in some benchmarks but very slightly faster in others; for real-time speaker-gate inference with a 200 ms re-extraction cadence the difference is noise.
+
+### ONNX tensor shape notes (to be confirmed at load time)
+
+- Input name: commonly `feats` or `input` — the WeSpeaker export uses `feats` based on their repo's `runtime/onnxruntime/` samples. Call `session.inputs()` at `EcapaTdnn::load` time and store the name, do not hard-code it.
+- Input shape: `f32[1, T]` where `T` is variable (dynamic axis). `T` should be in `[8000, 24000]` for meaningful embeddings (0.5 s to 1.5 s at 16 kHz, per the sliding window strategy below).
+- Output name: `embed` or `output` — again, resolve at load time.
+- Output shape: `f32[1, 256]`. **Not L2-normalized by the model**; the caller must normalize before cosine similarity.
+
+### Decisions
+
+- **Decision D-002 (revised 2026-04-14):** Use WeSpeaker ResNet34's pre-exported ONNX as the **primary** speaker embedding model. The original D-002 (dated 2026-04-13) made SpeechBrain ECAPA-TDNN the primary with WeSpeaker as the fallback, on the assumption that the ECAPA export would work. During Phase 2 execution (one day later), the decision was flipped proactively after weighing Q-001's risk against the fact that WeSpeaker publishes a tested binary ONNX. The old fallback path (WeSpeaker) becomes the new primary path; there is no new fallback. If WeSpeaker's discrimination test fails in Phase 2, the project is blocked on a model-quality issue (not an engineering issue) and we escalate.
+- **Decision D-003 (2026-04-13):** Embedding dimension is a `const EMBEDDING_DIM: usize` in `src/ml/embedding.rs`, not a literal. Under D-002 revised, that constant is now **256**, not 192. Profile.bin stores the dim in its header so a profile from a different model is safely rejected by `Profile::load`. D-003's design explicitly anticipated this flip.
+- **Q-001 (CLOSED, 2026-04-14):** "Does `torch.onnx.export` on `classifier.mods.embedding_model` produce a valid ECAPA-TDNN ONNX, or does it need a custom forward wrapper?" Not attempted. Closed by D-002 revision; see above.
 
 **Sliding window strategy** (PRD §5.5):
 
@@ -158,7 +170,8 @@ If a frame is late, the gate defaults to its last decision (no frame skip visibl
 | ID | Date | Decision | Phase | Source |
 |----|------|----------|------:|--------|
 | D-001 | 2026-04-13 | 32 ms / 1536-sample frames end-to-end | 1 | Research §2 |
-| D-002 | 2026-04-13 | Primary ECAPA-TDNN, fallback WeSpeaker, decide inside Phase 2 | 2 | Research §3 |
+| D-002 | 2026-04-13 | ~~Primary ECAPA-TDNN, fallback WeSpeaker, decide inside Phase 2~~ **Superseded 2026-04-14** | 2 | Research §3 |
+| D-002R | 2026-04-14 | WeSpeaker ResNet34 pre-exported ONNX as proactive primary; no Python export pipeline; EMBEDDING_DIM = 256 | 2 | Research §3 |
 | D-003 | 2026-04-13 | Embedding dim stored in profile.bin header (not literal) | 2, 3 | Research §3 |
 | D-004 | 2026-04-13 | `ringbuf` 0.4 SPSC, 3s capacity per queue | 1 | Research §4 |
 | D-005 | 2026-04-13 | ALSA variable-callback handled via worker pop in fixed chunks | 1 | Research §4 |
@@ -185,7 +198,7 @@ Questions to resolve during implementation. Each must have an owner and a phase 
 
 | ID | Question | Must answer by | Notes |
 |----|----------|---------------:|-------|
-| Q-001 | Does `torch.onnx.export` on `classifier.mods.embedding_model` directly produce a valid ECAPA-TDNN ONNX, or does it need a custom forward wrapper? | End of Phase 2 | PRD §7.2 warns about this. If Q-001 is "needs wrapper," the fallback from D-002 may trigger. |
+| ~~Q-001~~ | ~~Does `torch.onnx.export` on `classifier.mods.embedding_model` directly produce a valid ECAPA-TDNN ONNX, or does it need a custom forward wrapper?~~ **CLOSED 2026-04-14** | -- | Closed by D-002R -- we no longer export ECAPA ourselves; we use WeSpeaker's pre-exported ONNX. See Research §3. |
 | Q-002 | What's the actual end-to-end latency measured with a click-track loopback on real hardware? | End of Phase 4 | Budget is 50 ms per PRD §13.4. Needs measurement to validate. |
 | Q-003 | Does CPU usage stay <10% on a mid-range machine during active use? | End of Phase 4 | PRD §13.5. Measurement methodology goes here once established. |
 | Q-004 | Does `pipewire-rs` 0.8 compile on Ubuntu 22.04's stock PipeWire, or does it need a newer runtime? | Start of Phase 6 | If compat is poor, default feature set stays on `pw-cli`. |
