@@ -26,6 +26,15 @@ pub enum VoiceGateError {
     #[error("ML inference error: {0}")]
     Ml(String),
 
+    #[error("ML model file not found: {0}")]
+    ModelNotFound(String),
+
+    #[error(
+        "ONNX Runtime is not available. Install libonnxruntime.so 1.22.x (Linux) or \
+         onnxruntime.dll 1.22.x (Windows) -- see README.md for instructions."
+    )]
+    OrtUnavailable,
+
     #[error("enrollment error: {0}")]
     Enrollment(String),
 

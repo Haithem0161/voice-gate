@@ -59,7 +59,7 @@ impl EcapaTdnn {
     /// Load the WeSpeaker ResNet34 model from `model_path`.
     pub fn load(model_path: &Path) -> Result<Self, VoiceGateError> {
         if !model_path.exists() {
-            return Err(VoiceGateError::Ml(format!(
+            return Err(VoiceGateError::ModelNotFound(format!(
                 "wespeaker ONNX not found at {}. Run `make models` to download it.",
                 model_path.display()
             )));

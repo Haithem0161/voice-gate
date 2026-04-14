@@ -58,7 +58,7 @@ impl SileroVad {
     /// the ONNX Runtime shared library cannot be loaded (LoadLibrary).
     pub fn load(model_path: &Path) -> Result<Self, VoiceGateError> {
         if !model_path.exists() {
-            return Err(VoiceGateError::Ml(format!(
+            return Err(VoiceGateError::ModelNotFound(format!(
                 "silero_vad.onnx not found at {}. Run `make models` to download it.",
                 model_path.display()
             )));
