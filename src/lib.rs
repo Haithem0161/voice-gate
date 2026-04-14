@@ -3,12 +3,72 @@
 //! This is the library half of the crate; `main.rs` is the binary half and
 //! wires up clap subcommands to the modules re-exported here.
 
+pub mod app_controller;
 pub mod audio;
 pub mod config;
 pub mod enrollment;
 pub mod gate;
+pub mod gui;
 pub mod ml;
 pub mod pipeline;
+
+use std::path::{Path, PathBuf};
+
+/// Resolve a model file name (e.g. `silero_vad.onnx`) via the lookup order:
+/// env var VOICEGATE_MODELS_DIR -> executable-relative -> repo-relative.
+pub fn resolve_model_path(name: &str) -> anyhow::Result<PathBuf> {
+    if let Ok(dir) = std::env::var("VOICEGATE_MODELS_DIR") {
+        let candidate = PathBuf::from(dir).join(name);
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join("models").join(name);
+            if candidate.exists() {
+                return Ok(candidate);
+            }
+        }
+    }
+    let candidate = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("models")
+        .join(name);
+    if candidate.exists() {
+        return Ok(candidate);
+    }
+    anyhow::bail!(
+        "model {name} not found. Run `make models` to download it, or set VOICEGATE_MODELS_DIR."
+    )
+}
+
+/// Resolve an asset file name (e.g. `enrollment_passages.txt`) via the
+/// lookup order: env var VOICEGATE_ASSETS_DIR -> executable-relative -> repo-relative.
+pub fn resolve_asset_path(name: &str) -> anyhow::Result<PathBuf> {
+    if let Ok(dir) = std::env::var("VOICEGATE_ASSETS_DIR") {
+        let candidate = PathBuf::from(dir).join(name);
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join("assets").join(name);
+            if candidate.exists() {
+                return Ok(candidate);
+            }
+        }
+    }
+    let candidate = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("assets")
+        .join(name);
+    if candidate.exists() {
+        return Ok(candidate);
+    }
+    anyhow::bail!(
+        "asset {name} not found. Set VOICEGATE_ASSETS_DIR or place it next to the executable."
+    )
+}
 
 /// Top-level error type for all VoiceGate domain boundaries.
 ///
@@ -49,6 +109,9 @@ pub enum VoiceGateError {
 
     #[error("pipeline error: {0}")]
     Pipeline(String),
+
+    #[error("GUI error: {0}")]
+    Gui(String),
 }
 
 impl From<enrollment::profile::ProfileError> for VoiceGateError {

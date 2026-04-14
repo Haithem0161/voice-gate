@@ -106,7 +106,7 @@ fn main() -> Result<()> {
             } else if headless {
                 cmd_run_headless(profile, input_device)
             } else {
-                anyhow::bail!("specify --passthrough or --headless. GUI mode lands in Phase 5.")
+                voicegate::gui::app::run().map_err(|e| anyhow::anyhow!("GUI error: {e}"))
             }
         }
         Commands::Enroll {
@@ -566,63 +566,12 @@ fn read_wav_as_16k_mono(path: &Path) -> Result<Vec<f32>> {
     }
 }
 
-/// Resolve an asset file name (e.g. `enrollment_passages.txt`) via the
-/// lookup order documented in phase-03 section 5.2.
 fn resolve_asset_path(name: &str) -> Result<PathBuf> {
-    // 1. Env var override.
-    if let Ok(dir) = std::env::var("VOICEGATE_ASSETS_DIR") {
-        let candidate = PathBuf::from(dir).join(name);
-        if candidate.exists() {
-            return Ok(candidate);
-        }
-    }
-    // 2. Executable-relative (packaged builds).
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let candidate = dir.join("assets").join(name);
-            if candidate.exists() {
-                return Ok(candidate);
-            }
-        }
-    }
-    // 3. Repo-relative (dev builds).
-    let candidate = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("assets")
-        .join(name);
-    if candidate.exists() {
-        return Ok(candidate);
-    }
-    anyhow::bail!(
-        "asset {name} not found. Set VOICEGATE_ASSETS_DIR or place it next to the executable."
-    )
+    voicegate::resolve_asset_path(name)
 }
 
-/// Resolve a model file name (e.g. `silero_vad.onnx`) via an analogous
-/// lookup order: env var -> executable-relative -> repo-relative.
 fn resolve_model_path(name: &str) -> Result<PathBuf> {
-    if let Ok(dir) = std::env::var("VOICEGATE_MODELS_DIR") {
-        let candidate = PathBuf::from(dir).join(name);
-        if candidate.exists() {
-            return Ok(candidate);
-        }
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let candidate = dir.join("models").join(name);
-            if candidate.exists() {
-                return Ok(candidate);
-            }
-        }
-    }
-    let candidate = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("models")
-        .join(name);
-    if candidate.exists() {
-        return Ok(candidate);
-    }
-    anyhow::bail!(
-        "model {name} not found. Run `make models` to download it, or set VOICEGATE_MODELS_DIR."
-    )
+    voicegate::resolve_model_path(name)
 }
 
 /// Resolve the output profile path. Uses the explicit CLI arg first; falls
