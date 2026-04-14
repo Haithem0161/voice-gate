@@ -16,8 +16,11 @@ cpal = "0.15"
 rubato = "0.14"
 ringbuf = "0.4"
 
-# ML inference (unused in Phase 1; pinned now to avoid churn in Phase 2)
-ort = { version = "2", features = ["load-dynamic"] }
+# ML inference (unused in Phase 1; pinned now to avoid churn in Phase 2).
+# ort 2.x is still in release-candidate territory on crates.io -- pin the
+# exact RC here rather than the floating "2" requirement, which does not
+# match any prerelease. Revisit when ort 2.0.0 stable ships.
+ort = { version = "=2.0.0-rc.10", features = ["load-dynamic"] }
 ndarray = "0.15"
 
 # GUI (unused in Phase 1; pinned now for Phase 5)
