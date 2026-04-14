@@ -5,6 +5,7 @@
 
 pub mod audio;
 pub mod config;
+pub mod enrollment;
 pub mod ml;
 
 /// Top-level error type for all VoiceGate domain boundaries.
@@ -38,6 +39,15 @@ pub enum VoiceGateError {
     #[error("enrollment error: {0}")]
     Enrollment(String),
 
+    #[error("profile format error: {0}")]
+    ProfileFormat(String),
+
     #[error("gate state error: {0}")]
     Gate(String),
+}
+
+impl From<enrollment::profile::ProfileError> for VoiceGateError {
+    fn from(e: enrollment::profile::ProfileError) -> Self {
+        VoiceGateError::ProfileFormat(e.to_string())
+    }
 }

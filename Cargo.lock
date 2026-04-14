@@ -4458,6 +4458,7 @@ dependencies = [
  "anyhow",
  "clap",
  "cpal",
+ "crc32fast",
  "ctrlc",
  "dirs",
  "eframe",

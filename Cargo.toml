@@ -46,6 +46,7 @@ dirs = "5"
 which = "6"
 ctrlc = "3.5.2"
 realfft = "3.5.0"
+crc32fast = "1.5.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 pipewire = { version = "0.8", optional = true }
