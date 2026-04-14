@@ -1,11 +1,12 @@
-.PHONY: setup models dev devices run-passthrough test lint fmt fmt-check clippy build release package-linux package-windows clean help
+.PHONY: setup models fixtures dev devices run-passthrough test lint fmt fmt-check clippy build release package-linux package-windows clean help
 
 # Default target
 help:
 	@echo "VoiceGate -- make targets:"
 	@echo ""
 	@echo "  setup            Install rust components, cargo-watch, cargo-bundle, cargo-wix"
-	@echo "  models           Download/export ONNX models into ./models/"
+	@echo "  models           Download ONNX models into ./models/"
+	@echo "  fixtures         Download LibriSpeech clips and synthesize silence/noise into ./tests/fixtures/"
 	@echo "  dev              cargo watch -x run (dev loop)"
 	@echo "  devices          Run 'voicegate devices' to list cpal devices"
 	@echo "  run-passthrough  Run 'voicegate run --passthrough' (Phase 1 smoke test)"
@@ -32,6 +33,11 @@ setup:
 models:
 	bash scripts/download_models.sh
 	@echo "Models written to ./models/"
+
+# Download + synthesize test fixtures (Phase 2+)
+fixtures:
+	bash scripts/download_fixtures.sh
+	@echo "Fixtures written to ./tests/fixtures/"
 
 # Development loop (requires cargo-watch)
 dev:
