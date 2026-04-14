@@ -28,10 +28,9 @@ setup:
 	cargo install cargo-wix || true
 	@echo "Setup complete. Run 'make models' next to fetch ONNX models."
 
-# Download and export ML models
+# Download ONNX models (silero_vad.onnx + wespeaker_resnet34_lm.onnx)
 models:
-	python3 scripts/download_models.py
-	python3 scripts/export_ecapa.py
+	bash scripts/download_models.sh
 	@echo "Models written to ./models/"
 
 # Development loop (requires cargo-watch)

@@ -48,9 +48,10 @@ PipeWire must be running. On Ubuntu 22.04 LTS you may need to switch from PulseA
 **ONNX Runtime shared library** (required for ML inference in Phase 2+):
 
 ```bash
-wget https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-linux-x64-1.17.0.tgz
-tar xzf onnxruntime-linux-x64-1.17.0.tgz
-sudo cp onnxruntime-linux-x64-1.17.0/lib/libonnxruntime.so* /usr/local/lib/
+wget https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-linux-x64-1.22.0.tgz
+tar xzf onnxruntime-linux-x64-1.22.0.tgz
+sudo cp -a onnxruntime-linux-x64-1.22.0/lib/libonnxruntime.so* /usr/local/lib/
+sudo cp onnxruntime-linux-x64-1.22.0/lib/libonnxruntime_providers_shared.so /usr/local/lib/
 sudo ldconfig
 ```
 
@@ -60,7 +61,7 @@ Phase 1 (audio passthrough) does not require ONNX Runtime and will build and run
 
 - [Rust](https://rustup.rs/) 1.83+ (MSVC toolchain)
 - [VB-Audio Virtual Cable](https://vb-audio.com/Cable/) (free, required for the virtual microphone)
-- **ONNX Runtime DLL**: download `onnxruntime.dll` from [the ONNX Runtime releases page](https://github.com/microsoft/onnxruntime/releases/tag/v1.17.0) and place it next to `voicegate.exe` or on `PATH`.
+- **ONNX Runtime DLL**: download `onnxruntime.dll` from [the ONNX Runtime v1.22.0 release](https://github.com/microsoft/onnxruntime/releases/tag/v1.22.0) and place it next to `voicegate.exe` or on `PATH`. VoiceGate pins `ort = "=2.0.0-rc.10"` which requires ONNX Runtime 1.22.x; older versions (1.17, 1.18, etc.) will fail at `Session` creation with a version-mismatch error.
 
 After installing VB-Cable, reboot. In Discord, set your input device to **CABLE Output (VB-Audio Virtual Cable)**. VoiceGate will write to **CABLE Input (VB-Audio Virtual Cable)**.
 

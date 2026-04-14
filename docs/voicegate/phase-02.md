@@ -16,8 +16,9 @@
 **Rust source:**
 
 ```
+src/ml/fbank.rs             # Kaldi-compatible 80-bin log-Mel filterbank (added during Phase 2 exec)
 src/ml/vad.rs               # Silero VAD wrapper with persistent GRU state
-src/ml/embedding.rs         # WeSpeaker ResNet34 wrapper, L2 normalization, sliding window buffer
+src/ml/embedding.rs         # WeSpeaker ResNet34 wrapper (feats input via fbank), L2 normalization, sliding window buffer
 src/ml/similarity.rs        # cosine_similarity + SpeakerVerifier (EMA smoothing)
 ```
 
@@ -185,9 +186,59 @@ impl EmbeddingWindow {
 }
 ```
 
-- `extract` builds an `Array2<f32>` of shape `[1, audio_16k.len()]`, runs the session, extracts output `[1, EMBEDDING_DIM]`, and L2-normalizes.
+- **`extract` does NOT feed raw audio directly to the model.** The ort smoke test (step 5 of Phase 2 execution) revealed that WeSpeaker's ONNX input `feats` has shape `f32[B, T, 80]`, meaning it expects pre-computed 80-bin Mel filterbank features, not a raw waveform. `extract` therefore:
+  1. Calls `crate::ml::fbank::compute_fbank(audio_16k)` to produce a `Vec<f32>` of length `T * 80` representing the Mel feature matrix (see §3.6 below for the fbank module).
+  2. Applies Cepstral Mean Normalization (CMN): subtract the time-wise mean from each of the 80 features. This matches WeSpeaker's Python reference `mat - torch.mean(mat, dim=0)`.
+  3. Builds an `Array3<f32>` of shape `[1, T, 80]` from the normalized features.
+  4. Runs `session.run({self.input_name: <tensor>})`.
+  5. Reads the `embs` output (shape `[1, 256]`), L2-normalizes, and returns as `Vec<f32>`.
+- `input_name` and `output_name` are resolved at `load()` time from `session.inputs()[0].name` and `session.outputs()[0].name` respectively; for the WeSpeaker ResNet34_LM ONNX they are `"feats"` and `"embs"`.
 - `EmbeddingWindow::push` copies bytes; when `buf.len() > MAX_WINDOW_SAMPLES_16K`, it discards the oldest samples (ring-buffer semantics but using a `Vec` + tail-shift for simplicity; not hot path).
 - `should_extract()` returns `true` iff `buf.len() >= MIN_WINDOW_SAMPLES_16K` AND `samples_since_last_extract >= REEXTRACT_INTERVAL_SAMPLES_16K`.
+
+### 3.6 `src/ml/fbank.rs` (NEW, introduced during Phase 2 execution)
+
+**Why this module exists:** WeSpeaker's ONNX files are "runtime models" -- they ship without the feature extractor baked into the graph. The caller is expected to compute Kaldi-compatible log-Mel filterbank features and feed the `[B, T, 80]` tensor as the `feats` input. See `wespeaker/bin/infer_onnx.py` in the WeSpeaker repo for the canonical reference. Phase 2's original plan assumed the ONNX would accept raw audio; the ort smoke test caught this and this module was added to close the gap.
+
+```rust
+/// Kaldi-compatible 80-bin log-Mel filterbank extractor. Matches the
+/// `torchaudio.compliance.kaldi.fbank` reference used by WeSpeaker's
+/// infer_onnx.py sample:
+///
+///   num_mel_bins = 80
+///   frame_length = 25 ms  (= 400 samples @ 16 kHz)
+///   frame_shift  = 10 ms  (= 160 samples @ 16 kHz)
+///   window_type  = hamming
+///   dither       = 0.0
+///   use_energy   = false
+///
+/// Input waveform must be f32 at 16 kHz in the [-1, 1] range. The extractor
+/// internally scales by 2^15 (the `waveform * (1 << 15)` line in the WeSpeaker
+/// reference) before the STFT step.
+pub struct FbankExtractor {
+    planner: realfft::RealFftPlanner<f32>,
+    window: [f32; FRAME_LENGTH_SAMPLES], // pre-computed Hamming window
+    mel_filters: Vec<Vec<f32>>,          // 80 filters, each of length FFT_SIZE / 2 + 1
+}
+
+pub const FRAME_LENGTH_SAMPLES: usize = 400;   // 25 ms @ 16 kHz
+pub const FRAME_SHIFT_SAMPLES: usize = 160;    // 10 ms @ 16 kHz
+pub const FFT_SIZE: usize = 512;               // next pow2 >= FRAME_LENGTH_SAMPLES
+pub const NUM_MEL_BINS: usize = 80;
+
+impl FbankExtractor {
+    pub fn new() -> Self;
+
+    /// Produce an f32 slice of shape [T, 80] (flattened row-major) where
+    /// T = (audio.len() - FRAME_LENGTH_SAMPLES) / FRAME_SHIFT_SAMPLES + 1.
+    /// The caller reshapes it to [1, T, 80] for the ONNX input tensor.
+    pub fn compute(&mut self, audio_16k: &[f32]) -> Vec<f32>;
+}
+```
+
+The implementation uses `realfft::RealFftPlanner` for the STFT (real-valued input, half the work of complex FFT). `realfft` is already in the dep tree transitively via `rubato` -- Phase 2 promotes it to a direct dependency via `cargo add realfft@3.5`.
+
+**Validation strategy (D-002R consequence):** We do NOT maintain a numerical reference for the fbank extractor on its own. Per the "no Python" principle behind D-002R, generating a numpy/torchaudio reference would reintroduce the Python dependency we just cut. Instead, the fbank is validated end-to-end by the `test_embedding_discrimination` test: if fbank is wrong, WeSpeaker's embeddings will be meaningless and the speaker_a vs speaker_b cosine will be close to 1.0 (no discrimination). If the discrimination test passes (cosine < 0.5), the fbank is by construction correct enough for the product. Unit-level sanity tests still check window, FFT size, frame count, and shape invariants, but no numerical-value reference is maintained.
 
 ### 3.4 `src/ml/similarity.rs`
 
@@ -256,10 +307,18 @@ OrtUnavailable,
 ### 4.2 WeSpeaker embedding call sequence (per 200 ms extraction trigger)
 
 1. Worker thread checks `embedding_window.should_extract()`.
-2. If true, call `ecapa.extract(embedding_window.snapshot())` on the current window contents.
-3. `extract()` builds a `[1, N]` f32 tensor under the input tensor name resolved at load time, runs the session, reads the output tensor (shape `[1, 256]`) under the output name resolved at load time, L2-normalizes into a fresh `Vec<f32>`, returns.
+2. If true, call `ecapa.extract(embedding_window.snapshot())` on the current 16 kHz f32 window contents.
+3. `extract()`:
+   a. Calls `fbank::compute(audio_16k)` to produce a flat `Vec<f32>` of length `T * 80` representing Kaldi-compatible log-Mel filterbank features.
+   b. Applies CMN per feature over time (80 per-column means subtracted).
+   c. Builds an `Array3<f32>` of shape `[1, T, 80]` and wraps it as an ort `Value`.
+   d. Runs `session.run({"feats": <value>})` (input name resolved at load).
+   e. Reads the `embs` output tensor (shape `[1, 256]`) (output name resolved at load).
+   f. L2-normalizes the 256-float vector in place and returns it as `Vec<f32>`.
 4. Caller passes the result to `SpeakerVerifier::update()`.
 5. `embedding_window.mark_extracted()` resets the interval counter.
+
+**Latency budget:** fbank (~1-2 ms for 1.5 s of audio) + ONNX session run (~5-15 ms) + L2 normalization (microseconds) = 10-20 ms total per extraction on a mid-range CPU. Runs on the worker thread, not on a cpal callback. Fires ~5 times/second when VAD is active, so total CPU cost is ~5-10%.
 
 **Latency:** 5–15 ms for 0.5–1.5 s windows. Runs on the worker thread, so input/output callbacks are unaffected. Fires ~5 times/second when VAD is active.
 

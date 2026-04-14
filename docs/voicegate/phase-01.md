@@ -520,14 +520,17 @@ Out of scope for Phase 1 (not in PRD §13 success criteria, and reconnect logic 
 
 - **Linux:**
   ```bash
-  wget https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-linux-x64-1.17.0.tgz
-  tar xzf onnxruntime-linux-x64-1.17.0.tgz
-  sudo cp onnxruntime-linux-x64-1.17.0/lib/libonnxruntime.so* /usr/local/lib/
+  wget https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-linux-x64-1.22.0.tgz
+  tar xzf onnxruntime-linux-x64-1.22.0.tgz
+  sudo cp -a onnxruntime-linux-x64-1.22.0/lib/libonnxruntime.so* /usr/local/lib/
+  sudo cp onnxruntime-linux-x64-1.22.0/lib/libonnxruntime_providers_shared.so /usr/local/lib/
   sudo ldconfig
   ```
 - **Windows:** Download `onnxruntime.dll` from the same release page; place next to `voicegate.exe` or on `PATH`.
 
 Phase 1 itself does NOT load any ONNX models (`ort` uses `load-dynamic`, so missing `libonnxruntime.so` causes a deferred runtime error, not a build error). Verification of a working ONNX Runtime install happens in Phase 2 when `SileroVad::load` runs for the first time.
+
+**2026-04-14 version correction:** the original Phase 1 README and this gap note both cited ONNX Runtime 1.17.0. That was wrong relative to our pinned `ort = "=2.0.0-rc.10"` crate, which does a strict version check against the runtime binary and requires **1.22.x**. Phase 2 step 3 (the ort smoke test) caught this at first session create: the load succeeded via dlopen but ort panicked with "expected GetVersionString to return '1.22.x', but got '1.17.0'". The README, this gap note, and `src/audio/virtual_mic.rs` install instructions were all updated to reference **1.22.0** (the latest 1.22.x release that ships a Linux x86_64 tarball -- 1.22.1 and 1.22.2 are NuGet-only patch releases). Re-installing per the corrected instructions makes `cargo test --test test_ort_smoke` pass cleanly on both models.
 
 ### 6.3 PipeWire virtual-mic mechanism: `pw-loopback`, not `pw-cli create-node` (Execution discovery, HIGH, G-014)
 
