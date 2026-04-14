@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use crate::audio::resampler::{Resampler48to16, INPUT_CHUNK_SAMPLES};
 use crate::config::Config;
+use crate::enrollment::anti_target::AntiTarget;
 use crate::enrollment::profile::Profile;
 use crate::gate::audio_gate::{AudioGate, GateState};
 use crate::ml::embedding::{EcapaTdnn, EmbeddingWindow};
@@ -35,6 +36,7 @@ pub struct PipelineProcessor {
     verifier: SpeakerVerifier,
     gate: AudioGate,
     resample_accum: Vec<f32>,
+    anti_targets: Vec<AntiTarget>,
     status: Arc<PipelineStatus>,
     vad_threshold: f32,
     verify_threshold: f32,
@@ -51,6 +53,7 @@ impl PipelineProcessor {
         let resampler = Resampler48to16::new()?;
         let crossfade_samples = config.gate.crossfade_samples(config.audio.sample_rate);
         let gate = AudioGate::new(config.gate.hold_frames, crossfade_samples);
+        let anti_targets = profile.anti_targets.clone();
         let verifier = SpeakerVerifier::new(
             profile.embedding,
             config.verification.threshold,
@@ -65,6 +68,7 @@ impl PipelineProcessor {
             verifier,
             gate,
             resample_accum: Vec::with_capacity(VAD_CHUNK_SAMPLES * 2),
+            anti_targets,
             status,
             vad_threshold: config.vad.threshold,
             verify_threshold: config.verification.threshold,
@@ -89,7 +93,12 @@ impl PipelineProcessor {
                 self.window.push(&chunk);
                 if self.window.should_extract() {
                     let live = self.ecapa.extract(self.window.snapshot())?;
-                    self.verifier.update(&live);
+                    if self.anti_targets.is_empty() {
+                        self.verifier.update(&live);
+                    } else {
+                        self.verifier
+                            .update_with_anti_targets(&live, &self.anti_targets);
+                    }
                     self.window.mark_extracted();
                     self.status
                         .similarity

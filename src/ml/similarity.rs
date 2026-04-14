@@ -120,6 +120,33 @@ impl SpeakerVerifier {
         self.current_score
     }
 
+    /// Update with anti-target margin scoring. Computes:
+    ///   raw = sim(live, enrolled) - max(sim(live, anti_i))
+    /// then applies EMA smoothing. The match threshold is shifted down
+    /// by 0.5 to account for the margin range being [-1, +1] instead
+    /// of [0, 1].
+    pub fn update_with_anti_targets(
+        &mut self,
+        live: &[f32],
+        anti_targets: &[crate::enrollment::anti_target::AntiTarget],
+    ) -> VerifyResult {
+        debug_assert_eq!(live.len(), EMBEDDING_DIM);
+        let self_sim = cosine_similarity(&self.enrolled, live);
+        let max_anti = anti_targets
+            .iter()
+            .map(|at| cosine_similarity(&at.embedding, live))
+            .fold(f32::NEG_INFINITY, f32::max);
+        let raw = self_sim - max_anti;
+        self.current_score = self.ema_alpha * raw + (1.0 - self.ema_alpha) * self.current_score;
+
+        let adjusted_threshold = self.threshold - 0.5;
+        if self.current_score >= adjusted_threshold {
+            VerifyResult::Match(self.current_score)
+        } else {
+            VerifyResult::NoMatch(self.current_score)
+        }
+    }
+
     /// Reset the EMA state to 0. Call only at enrollment boundaries or
     /// on long silence gaps (>500 ms) when G-007's "don't update on
     /// silence" rule no longer applies.
