@@ -33,10 +33,48 @@ pub struct OutputStream {
 /// Start a 48 kHz mono f32 output stream on `device_name`, popping samples
 /// from `consumer`. If the named device only supports stereo, the callback
 /// duplicates the mono stream into both channels.
+///
+/// On Linux, if `device_name` is a PipeWire node name (e.g. `voicegate_sink`)
+/// that cpal's ALSA backend cannot enumerate directly, we set the
+/// `PIPEWIRE_NODE` env var to route the `pipewire` ALSA device to the
+/// target node. This resolves G-016.
 pub fn start_output(device_name: &str, consumer: AudioConsumer) -> anyhow::Result<OutputStream> {
     let host = cpal::default_host();
-    let device = find_output_device(&host, device_name)?;
-    let resolved_name = device.name().unwrap_or_else(|_| device_name.to_string());
+
+    // G-016 fix: on Linux, PipeWire nodes are not visible as ALSA device
+    // names. If the requested name is not in cpal's device list, try
+    // routing via the PIPEWIRE_NODE env var + the "pipewire" ALSA device.
+    let (device, actual_name) = match find_output_device(&host, device_name) {
+        Ok(dev) => {
+            let name = dev.name().unwrap_or_else(|_| device_name.to_string());
+            (dev, name)
+        }
+        Err(_) => {
+            #[cfg(target_os = "linux")]
+            {
+                tracing::info!(
+                    requested = %device_name,
+                    "output device not found by name, trying PIPEWIRE_NODE routing"
+                );
+                std::env::set_var("PIPEWIRE_NODE", device_name);
+                let dev = find_output_device(&host, "pipewire").map_err(|_| {
+                    anyhow::anyhow!(
+                        "output device {:?} not found, and 'pipewire' ALSA device also \
+                         unavailable. Is PipeWire running?",
+                        device_name
+                    )
+                })?;
+                let name = dev.name().unwrap_or_else(|_| "pipewire".to_string());
+                (dev, name)
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                anyhow::bail!("output device {:?} not found", device_name);
+            }
+        }
+    };
+
+    let resolved_name = actual_name;
 
     let supported = device
         .default_output_config()
