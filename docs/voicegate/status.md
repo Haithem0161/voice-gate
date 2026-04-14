@@ -1,13 +1,13 @@
 # VoiceGate Status Tracker
 
-**Last updated:** 2026-04-13 (plan authored)
-**Overall status:** Planning complete; implementation not started.
+**Last updated:** 2026-04-14 (Phase 1 structurally complete; manual mic smoke test deferred)
+**Overall status:** Phase 1 commits (6) shipped. Automated gate PASS. Manual mic-to-Discord smoke test DEFERRED to Phase 2 due to G-015 (cpal 0.15 ALSA i16/44100 vs 48k f32 gap) and G-016 (cpal 0.15 cannot target PipeWire `voicegate_sink` node by name). Both gaps are Phase 2's responsibility to resolve. Also discovered and fixed in-pass: G-014 (pw-cli create-node broken on PipeWire 1.0.x; replaced with pw-loopback).
 
 ## Phase Status Table
 
 | # | Phase | Status | Started | Completed | New Modules | New Tests | New Crates | CLI/GUI Surface Added |
 |---|-------|--------|---------|-----------|-------------|-----------|------------|------------------------|
-| 1 | Foundation Morph + Audio Passthrough | not started | — | — | 0/11 | 0/0 | 0/16 | `devices`, `run --passthrough` |
+| 1 | Foundation Morph + Audio Passthrough | structurally complete (manual gate partial) | 2026-04-14 | 2026-04-14 | 11/11 | 6/0 | 17/16 (+ ctrlc via `cargo add`) | `devices`, `run --passthrough` |
 | 2 | ML Inference Primitives | not started | — | — | 0/4 | 0/10 | 0/0 | none |
 | 3 | Enrollment + CLI | not started | — | — | 0/3 | 0/8 | 0/1 | `enroll --wav`, `enroll --mic`, `enroll --list-passages` |
 | 4 | Gate + Pipeline Integration | not started | — | — | 0/4 | 0/11 | 0/0 | `run --headless` |
@@ -76,9 +76,22 @@ Per-pass summary with counts and category breakdown. Updated after each pass.
 - **Audit C success criteria:** All 10 PRD §13 criteria traceable to concrete tests. Criterion 3's test tightened via G-013.
 - **Conclusion:** Plan is execution-ready. Pass 3 not required.
 
-### Pass 3+ — Continue until 0 true gaps
+### Pass 3 — Execution discovery (2026-04-14, Phase 1 runtime testing)
 
-Target: ≤3 passes total. Each pass appends subsections to affected phase files (6.1, 6.2, ...).
+- **Date:** 2026-04-14
+- **Method:** Running `voicegate run --passthrough` end-to-end on the dev machine (PipeWire 1.0.5, cpal 0.15, Ubuntu 24.10-class). Not a pre-execution audit; gaps found by executing the built binary and reading real error messages.
+- **Gaps found:** 3 (1 HIGH fixed in-place, 1 MEDIUM deferred to Phase 2, 1 HIGH deferred to Phase 2)
+- **Absorbed into:**
+  - phase-01.md §6.3 — **G-014 (HIGH, FIXED)**: PRD Appendix C's `pw-cli create-node adapter ... && pw-link` does not work on PipeWire 1.0.x because `pw-cli create-node` creates client-owned nodes that die with the pw-cli process. Replaced by spawning `pw-loopback` as a long-running child process in `PwCliVirtualMic::setup`; Drop impl reaps it. `scripts/setup_pipewire.sh` rewritten to match. Code lands in commit `fdf2204`.
+  - phase-01.md §6.4 — **G-015 (MEDIUM, DEFERRED)**: cpal 0.15's ALSA backend reports only f32 in `supported_input_configs` for the dev machine's Intel HDA / ALC623 input, but actual 48 kHz f32 open fails with `snd_pcm_hw_params` I/O error 5. `arecord` at 48000 S16_LE works fine. Deferred to Phase 2's resampler work; Phase 2 will add i16→f32 capture conversion and optional 44100→48000 pre-resample.
+  - phase-01.md §6.5 — **G-016 (HIGH, DEFERRED)**: cpal 0.15 on Linux enumerates only ALSA-level device names (`default`, `pipewire`, `hw:*`), not individual PipeWire nodes. Even though `voicegate_sink` is successfully created as a PipeWire node by `pw-loopback`, cpal's `Host::output_devices()` does not expose it, so `start_output("voicegate_sink", ...)` fails. Pragmatic Phase 2 fix: set `PIPEWIRE_NODE=voicegate_sink` in the process environment before building the cpal output stream, or use `pw-metadata` for per-process default routing. Long-term fix: bypass cpal on Linux and write directly via `pipewire-rs` (Phase 6 `pipewire-native` feature).
+- **Distribution:** 2 HIGH / 1 MEDIUM / 0 LOW.
+- **Status:** G-014 resolved in step 7 of Phase 1 execution. G-015 and G-016 documented as Phase 2 work items.
+- **Report:** [PHASE-1-VERIFICATION.md](PHASE-1-VERIFICATION.md).
+
+### Pass 4+ — Continue until 0 true gaps
+
+Target: ≤4 passes total. Each pass appends subsections to affected phase files (6.1, 6.2, ...).
 
 ### Verification Pass — Final
 

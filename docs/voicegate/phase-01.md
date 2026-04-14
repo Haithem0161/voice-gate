@@ -529,7 +529,7 @@ Out of scope for Phase 1 (not in PRD §13 success criteria, and reconnect logic 
 
 Phase 1 itself does NOT load any ONNX models (`ort` uses `load-dynamic`, so missing `libonnxruntime.so` causes a deferred runtime error, not a build error). Verification of a working ONNX Runtime install happens in Phase 2 when `SileroVad::load` runs for the first time.
 
-### 6.3 PipeWire virtual-mic mechanism: `pw-loopback`, not `pw-cli create-node` (Execution discovery, HIGH)
+### 6.3 PipeWire virtual-mic mechanism: `pw-loopback`, not `pw-cli create-node` (Execution discovery, HIGH, G-014)
 
 **Gap:** PRD Appendix C and the original phase-01 §3.4 spec called for creating the Linux virtual mic via `pw-cli create-node adapter '{ ... }'` for both `voicegate_sink` and `voicegate_mic`, then linking them with `pw-link voicegate_sink:monitor_MONO voicegate_mic:input_MONO`, and tearing down with `pw-cli destroy-node <name>`. This approach does not work on PipeWire 1.0.x. It was discovered during step 7 of the Phase 1 morph, after `cargo run -- run --passthrough` failed with `pw-link: failed to link ports: No such file or directory` on the very first end-to-end smoke test.
 
@@ -569,11 +569,11 @@ The **end-to-end mic-to-voicegate_mic audio smoke test** (phase-01 §6 steps 9-1
 **Workarounds for verification on a different machine or by a future phase:**
 - Run the smoke test on a machine whose default mic natively reports 48 kHz f32.
 - Or route `pw-loopback` output through to a test capture via `pw-cat --record - | ...` to verify the `voicegate_sink` half of the pipeline without needing live mic input.
-- Phase 2 will add rubato-based resampling and may also add capture-side resampling + i16-to-f32 conversion if this turns out to be common across target hardware. Track as new gap **G-014** below.
+- Phase 2 will add rubato-based resampling and may also add capture-side resampling + i16-to-f32 conversion if this turns out to be common across target hardware. Track as new gap **G-015** below.
 
 **Severity:** **HIGH** for the pw-loopback discovery (the plan would have shipped a broken Linux path); **MEDIUM** for the partial smoke-test gap (the code is correct but cannot be proven end-to-end on this hardware). Moving both into the gap log so Phase 6 can audit whether the `pipewire-native` implementation also needs to use `pw-loopback`-equivalent semantics (it will: it needs to create a persistent virtual source, not a client-owned one), and so Phase 2 can decide whether to add capture-side format/rate conversion.
 
-### 6.4 Capture-side f32-only assumption is too strict for common hardware (Execution discovery, MEDIUM, G-014)
+### 6.4 Capture-side f32-only assumption is too strict for common hardware (Execution discovery, MEDIUM, G-015)
 
 **Gap:** Phase 1 `audio::capture::start_capture` requires the cpal input device to support exactly 48 kHz f32 because the ring buffer and the entire downstream pipeline are f32. Many common ALSA devices (including the integrated HDA on the test machine, a Realtek ALC623) expose only i16 in their cpal-enumerated supported configs even when the underlying hardware can do 48 kHz natively. `cpal::SampleFormat::I16` at 48 kHz is ruled out by `find_48khz_f32_channels`, producing a clean error but no usable capture stream.
 
@@ -587,3 +587,32 @@ The **end-to-end mic-to-voicegate_mic audio smoke test** (phase-01 §6 steps 9-1
 Do NOT add format conversion inside the cpal callback beyond a simple `as f32` cast for i16 -- anything more (u24, 24-bit packed) belongs in a pre-worker stage in the ring buffer pipeline.
 
 **Why not fix this in Phase 1:** the Phase 1 scope is identity passthrough, and adding format conversion + sample rate conversion compounds the risk of a Phase 1 that is supposed to be structurally minimal. Phase 2's `resampler.rs` is the natural home for this work since it already owns the rate-conversion path.
+
+### 6.5 cpal 0.15 cannot target a PipeWire node by name (Execution discovery, HIGH, G-016)
+
+**Gap:** Phase 1 assumed that after `PwCliVirtualMic::setup()` creates the `voicegate_sink` PipeWire node (via `pw-loopback`), the name `"voicegate_sink"` can be passed to `start_output()` and cpal will find a matching output device. In practice, **cpal 0.15's ALSA backend does not expose individual PipeWire nodes as cpal devices.** `voicegate devices` lists only ALSA-level device names (`default`, `pipewire`, `hw:CARD=PCH,*`), not PipeWire nodes. The output call looks up an output device whose `.name()` matches `"voicegate_sink"` and fails with "output device not found."
+
+Empirical verification on the dev machine (PipeWire 1.0.5, Ubuntu 24.10-equivalent):
+
+1. `pw-loopback --capture-props 'node.name=voicegate_sink media.class=Audio/Sink' ...` was spawned.
+2. `pw-cli ls Node | grep voicegate_sink` confirms the node exists.
+3. `voicegate devices` does NOT list `voicegate_sink` in its output device enumeration.
+4. Therefore `start_output("voicegate_sink", consumer)` returns "output device \"voicegate_sink\" not found" at step 7 of main.rs's startup sequence.
+
+The virtual mic half of the pipeline (the `voicegate_mic` source that Discord reads) is fine -- pw-loopback wires its own internal loopback from sink to source. The problem is getting VoiceGate's OWN audio *into* the sink via cpal.
+
+**Options for resolution (deferred to Phase 2 or Phase 6):**
+
+1. **Use `pw-loopback`'s capture side differently.** Instead of letting VoiceGate's cpal output write to `voicegate_sink`, have pw-loopback pair its capture side with a VoiceGate-owned producer. This requires using `pipewire-rs` natively (Phase 6 `pipewire-native` feature) so VoiceGate can register a PipeWire stream directly against `voicegate_sink`.
+
+2. **Set `voicegate_sink` as the default PipeWire sink for the VoiceGate process only.** PipeWire supports per-process default routing via `PIPEWIRE_NODE` or `PULSE_SINK` environment variables. Setting `PIPEWIRE_NODE=voicegate_sink` before spawning cpal's output stream (or, equivalently, calling `pw-metadata 0 "default.audio.sink" ...` scoped to the process) would steer cpal's output to the correct node. This is a pragmatic Phase 2 fix.
+
+3. **Use `pactl load-module module-null-sink`** (PulseAudio API, which PipeWire implements) to create a sink that cpal exposes as an ALSA device. This was the Phase 6 PulseAudio fallback per Decision D-007, but it turns out to be necessary earlier than Phase 6 because the pw-loopback path does not compose with cpal 0.15 on its own.
+
+4. **Write directly to the sink via `pipewire-rs` at capture time** (bypass cpal output entirely on Linux). This is the cleanest long-term solution and matches the `pipewire-native` plan, but it is a large scope increase for Phase 1.
+
+**Path chosen for now (Phase 1 ships partially):** Phase 1's code is left as-is because the bug is not in the code -- it is in the assumption that cpal-by-name routing to pw-loopback works. The phase file is updated to document this limitation; Phase 1 is marked partially-verified (automated gate PASS, manual mic-to-Discord smoke test DEFERRED); Phase 2 takes ownership of G-015 (capture format/rate conversion) AND G-016 (Linux output routing to `voicegate_sink`) as part of its pipeline work.
+
+**Severity:** **HIGH**. The Linux audio passthrough is not end-to-end functional in Phase 1 until G-016 is resolved in Phase 2. On Windows, the VB-Cable path is expected to work because VB-Cable exposes itself as a regular ALSA-equivalent (WASAPI) device name that cpal DOES enumerate, but this also needs to be verified on real Windows hardware.
+
+**Recommendation for Phase 2:** take the pragmatic fix (option 2 above) -- set `PIPEWIRE_NODE=voicegate_sink` in the process environment before starting the cpal output stream, OR use `pw-metadata` to route just VoiceGate's output. This is a small, reversible change that unblocks the smoke test without waiting for `pipewire-rs`.
