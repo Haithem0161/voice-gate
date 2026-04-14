@@ -5,63 +5,132 @@ use serde::{Deserialize, Serialize};
 
 use crate::VoiceGateError;
 
-/// Root TOML config.
-///
-/// Only the `[audio]` section is populated in Phase 1. Later phases add
-/// `[vad]`, `[verification]`, `[gate]`, `[enrollment]`, and `[gui]` sections
-/// per PRD §5.9.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
 pub struct Config {
     pub audio: AudioConfig,
+    pub vad: VadConfig,
+    pub verification: VerificationConfig,
+    pub gate: GateConfig,
+    pub enrollment: EnrollmentConfig,
+    pub gui: GuiConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AudioConfig {
-    /// "default" or a specific cpal input device name.
     pub input_device: String,
-
-    /// "auto" (resolve via VirtualMic::setup) or a specific cpal output device name.
     pub output_device: String,
-
-    /// Frame size in milliseconds. Matches PRD §5.9 TOML key `frame_size_ms`.
-    /// Hard-coded to 32 in v1 -- see `Config::validate` and Decision D-001 in
-    /// `docs/voicegate/research.md`. Non-default values are rejected at load
-    /// time because Silero VAD requires exactly 512 samples at 16 kHz, which
-    /// only aligns at 32 ms frames.
     pub frame_size_ms: u32,
-
     pub sample_rate: u32,
 }
 
 impl AudioConfig {
-    /// Derived sample count: `frame_size_ms * sample_rate / 1000`. For the v1
-    /// values (32 ms x 48 000 Hz) this is exactly 1536.
     pub fn frame_size_samples(&self) -> usize {
         (self.frame_size_ms as usize) * (self.sample_rate as usize) / 1000
     }
 }
 
-impl Default for Config {
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct VadConfig {
+    pub threshold: f32,
+    pub model_path: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct VerificationConfig {
+    pub threshold: f32,
+    pub ema_alpha: f32,
+    pub model_path: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GateConfig {
+    pub hold_frames: u32,
+    pub crossfade_ms: f32,
+}
+
+impl GateConfig {
+    pub fn crossfade_samples(&self, sample_rate: u32) -> usize {
+        (self.crossfade_ms * sample_rate as f32 / 1000.0) as usize
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct EnrollmentConfig {
+    pub profile_path: String,
+    pub min_duration_sec: u32,
+    pub segment_duration_sec: u32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GuiConfig {
+    pub show_similarity_meter: bool,
+    pub show_waveform: bool,
+}
+
+impl Default for AudioConfig {
     fn default() -> Self {
         Self {
-            audio: AudioConfig {
-                input_device: "default".into(),
-                output_device: "auto".into(),
-                frame_size_ms: 32,
-                sample_rate: 48_000,
-            },
+            input_device: "default".into(),
+            output_device: "auto".into(),
+            frame_size_ms: 32,
+            sample_rate: 48_000,
+        }
+    }
+}
+
+impl Default for VadConfig {
+    fn default() -> Self {
+        Self {
+            threshold: 0.5,
+            model_path: "models/silero_vad.onnx".into(),
+        }
+    }
+}
+
+impl Default for VerificationConfig {
+    fn default() -> Self {
+        Self {
+            threshold: 0.70,
+            ema_alpha: 0.3,
+            model_path: "models/wespeaker_resnet34_lm.onnx".into(),
+        }
+    }
+}
+
+impl Default for GateConfig {
+    fn default() -> Self {
+        Self {
+            hold_frames: 5,
+            crossfade_ms: 5.0,
+        }
+    }
+}
+
+impl Default for EnrollmentConfig {
+    fn default() -> Self {
+        Self {
+            profile_path: "auto".into(),
+            min_duration_sec: 20,
+            segment_duration_sec: 3,
+        }
+    }
+}
+
+impl Default for GuiConfig {
+    fn default() -> Self {
+        Self {
+            show_similarity_meter: true,
+            show_waveform: false,
         }
     }
 }
 
 impl Config {
-    /// Path resolution: `dirs::config_dir()/voicegate/config.toml`.
     pub fn default_path() -> Option<PathBuf> {
         dirs::config_dir().map(|d| d.join("voicegate").join("config.toml"))
     }
 
-    /// Load config from disk, falling back to `Config::default()` if the file
-    /// does not exist. Validates before returning.
     pub fn load() -> anyhow::Result<Self> {
         let path = Self::default_path()
             .ok_or_else(|| VoiceGateError::Config("could not resolve config dir".into()))?;
@@ -79,8 +148,6 @@ impl Config {
         Ok(config)
     }
 
-    /// Serialize and write the current config to `default_path()`. Creates the
-    /// parent directory if missing.
     pub fn save(&self) -> anyhow::Result<()> {
         let path = Self::default_path()
             .ok_or_else(|| VoiceGateError::Config("could not resolve config dir".into()))?;
@@ -96,8 +163,6 @@ impl Config {
         Ok(())
     }
 
-    /// Validate user-provided config values. Returns a clean error instead of
-    /// panicking or silently accepting out-of-range values.
     pub fn validate(&self) -> Result<(), VoiceGateError> {
         if self.audio.frame_size_ms != 32 {
             return Err(VoiceGateError::Config(format!(
@@ -111,6 +176,16 @@ impl Config {
                 "audio.sample_rate = {} is not supported. Only 48000 is valid in v1.",
                 self.audio.sample_rate
             )));
+        }
+        if self.gate.crossfade_ms <= 0.0 {
+            return Err(VoiceGateError::Config(
+                "gate.crossfade_ms must be positive".into(),
+            ));
+        }
+        if self.verification.ema_alpha <= 0.0 || self.verification.ema_alpha > 1.0 {
+            return Err(VoiceGateError::Config(
+                "verification.ema_alpha must be in (0, 1]".into(),
+            ));
         }
         Ok(())
     }
@@ -148,5 +223,47 @@ mod tests {
             c.audio.frame_size_samples(),
             (c.audio.frame_size_ms as usize) * (c.audio.sample_rate as usize) / 1000
         );
+    }
+
+    #[test]
+    fn crossfade_samples_at_48k() {
+        let g = GateConfig::default();
+        assert_eq!(g.crossfade_samples(48_000), 240);
+    }
+
+    #[test]
+    fn zero_crossfade_is_rejected() {
+        let mut c = Config::default();
+        c.gate.crossfade_ms = 0.0;
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn bad_ema_alpha_is_rejected() {
+        let mut c = Config::default();
+        c.verification.ema_alpha = 0.0;
+        assert!(c.validate().is_err());
+        c.verification.ema_alpha = 1.5;
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn serde_roundtrip_with_defaults() {
+        let c = Config::default();
+        let text = toml::to_string_pretty(&c).unwrap();
+        let c2: Config = toml::from_str(&text).unwrap();
+        assert_eq!(c2.audio.frame_size_ms, 32);
+        assert_eq!(c2.gate.hold_frames, 5);
+        assert!((c2.gate.crossfade_ms - 5.0).abs() < f32::EPSILON);
+        assert!((c2.verification.threshold - 0.70).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn partial_toml_fills_defaults() {
+        let text = "[audio]\ninput_device = \"mic1\"\noutput_device = \"auto\"\nframe_size_ms = 32\nsample_rate = 48000\n";
+        let c: Config = toml::from_str(text).unwrap();
+        c.validate().unwrap();
+        assert_eq!(c.gate.hold_frames, 5);
+        assert!((c.verification.ema_alpha - 0.3).abs() < f32::EPSILON);
     }
 }
