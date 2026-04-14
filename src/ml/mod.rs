@@ -5,3 +5,4 @@
 //! for the binding rules.
 
 pub mod fbank;
+pub mod vad;
