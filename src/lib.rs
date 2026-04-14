@@ -6,7 +6,9 @@
 pub mod audio;
 pub mod config;
 pub mod enrollment;
+pub mod gate;
 pub mod ml;
+pub mod pipeline;
 
 /// Top-level error type for all VoiceGate domain boundaries.
 ///
@@ -44,6 +46,9 @@ pub enum VoiceGateError {
 
     #[error("gate state error: {0}")]
     Gate(String),
+
+    #[error("pipeline error: {0}")]
+    Pipeline(String),
 }
 
 impl From<enrollment::profile::ProfileError> for VoiceGateError {
