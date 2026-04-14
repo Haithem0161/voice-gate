@@ -235,9 +235,9 @@ pub struct VbCableVirtualMic { /* detection state */ }
 ```
 
 - `create_virtual_mic()` returns the appropriate impl via `#[cfg(target_os)]`.
-- On Linux, `PwCliVirtualMic::setup()` shells out to `pw-cli create-node adapter ...` and `pw-link ...` per PRD Appendix C.
+- On Linux, `PwCliVirtualMic::setup()` spawns `pw-loopback` as a child process with `--capture-props` / `--playback-props` defining `voicegate_sink` (Audio/Sink) and `voicegate_mic` (Audio/Source/Virtual). See §6.3 below for why this replaces the PRD Appendix C `pw-cli create-node` + `pw-link` approach (short version: on PipeWire 1.0.x, `pw-cli create-node` creates a client-owned node that dies with the pw-cli process, so the original approach cannot work).
 - On Windows, `VbCableVirtualMic::setup()` scans cpal output devices for `"CABLE Input (VB-Audio Virtual Cable)"`. If missing, returns an `anyhow::Error` with the install link.
-- `teardown()` on Linux runs `pw-cli destroy-node voicegate_sink` and `pw-cli destroy-node voicegate_mic`.
+- `teardown()` on Linux sends SIGKILL to the `pw-loopback` child process and waits for exit; `pw-loopback` tears down its nodes on shutdown regardless of signal.
 
 ### 3.5 `src/audio/resampler.rs` (stub)
 
@@ -528,3 +528,62 @@ Out of scope for Phase 1 (not in PRD §13 success criteria, and reconnect logic 
 - **Windows:** Download `onnxruntime.dll` from the same release page; place next to `voicegate.exe` or on `PATH`.
 
 Phase 1 itself does NOT load any ONNX models (`ort` uses `load-dynamic`, so missing `libonnxruntime.so` causes a deferred runtime error, not a build error). Verification of a working ONNX Runtime install happens in Phase 2 when `SileroVad::load` runs for the first time.
+
+### 6.3 PipeWire virtual-mic mechanism: `pw-loopback`, not `pw-cli create-node` (Execution discovery, HIGH)
+
+**Gap:** PRD Appendix C and the original phase-01 §3.4 spec called for creating the Linux virtual mic via `pw-cli create-node adapter '{ ... }'` for both `voicegate_sink` and `voicegate_mic`, then linking them with `pw-link voicegate_sink:monitor_MONO voicegate_mic:input_MONO`, and tearing down with `pw-cli destroy-node <name>`. This approach does not work on PipeWire 1.0.x. It was discovered during step 7 of the Phase 1 morph, after `cargo run -- run --passthrough` failed with `pw-link: failed to link ports: No such file or directory` on the very first end-to-end smoke test.
+
+**Root causes:**
+
+1. **`pw-cli create-node` creates a client-owned node, not a persistent one.** The node is registered against the pw-cli session and is destroyed the moment `pw-cli` exits. So immediately after `pw-cli create-node adapter ...` returns success, the node is already gone. Any subsequent `pw-link` or cpal device scan will not find it.
+2. **`pw-cli destroy-node` is not a real subcommand on PipeWire 1.0.5.** The actual command is `destroy <object-id>` and takes a numeric ID from `pw-cli ls Node`, not a name. The teardown path in the original spec would have errored out in practice.
+3. **`voicegate_sink:monitor_MONO` is not necessarily the correct port name.** PipeWire derives port names from channel positions; MONO may be spelled differently depending on factory/config. Relying on a literal port name string is brittle even when the nodes do exist.
+
+**Resolution (applied to [src/audio/virtual_mic.rs](src/audio/virtual_mic.rs) and [scripts/setup_pipewire.sh](scripts/setup_pipewire.sh) in step 7):**
+
+Linux virtual mic now uses `pw-loopback`, the first-party PipeWire helper that owns a persistent capture sink + playback source pair wired by an internal loopback. `PwCliVirtualMic::setup` spawns:
+
+```bash
+pw-loopback \
+    --channels 1 \
+    --capture-props 'node.name=voicegate_sink node.description="VoiceGate Sink" media.class=Audio/Sink' \
+    --playback-props 'node.name=voicegate_mic node.description="VoiceGate Virtual Microphone" media.class=Audio/Source/Virtual'
+```
+
+as a child process and stores the `std::process::Child` handle. `teardown` sends SIGKILL (via `Child::kill`) and waits for exit; `pw-loopback`'s atexit behaviour removes the nodes cleanly regardless of signal. A `Drop` impl on `PwCliVirtualMic` defensively calls `teardown` to cover panics in the main thread.
+
+`scripts/setup_pipewire.sh` is rewritten to use `pw-loopback` as well and now runs as a foreground process (`exec`s pw-loopback); Ctrl-C tears down. The `verify` subcommand checks for `voicegate_sink` / `voicegate_mic` via `pw-cli ls Node`.
+
+**Why the struct is still called `PwCliVirtualMic`:** The name is unchanged to minimize scope creep during step 7. Phase 6 may rename it to `PwLoopbackVirtualMic` or replace the shell-out entirely with a `pipewire-rs` native impl behind the `pipewire-native` feature flag (Decision D-006).
+
+**Verification:** partial. The following sub-tests pass:
+
+1. `voicegate devices` lists cpal input and output devices with the default marked.
+2. `voicegate run --passthrough` spawns `pw-loopback` and `pw-cli ls Node | grep voicegate_` shows both `voicegate_sink` and `voicegate_mic` as persistent nodes.
+3. On SIGINT or any error exit, `PwCliVirtualMic::drop` reaps the `pw-loopback` child and `pw-cli ls Node | grep voicegate_` returns empty.
+4. Unit tests (`cargo test --lib`): 6/6 pass (ring buffer order, ring capacity constant, 4 x config validation).
+5. `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, and `cargo build --release` all clean.
+
+The **end-to-end mic-to-voicegate_mic audio smoke test** (phase-01 §6 steps 9-11) cannot be completed on the development machine because its default audio input is reported by cpal's ALSA backend at 44 100 Hz i16, and Phase 1 does not implement capture-side rate conversion (Decision D-001 pins the entire pipeline to 48 kHz f32). On this machine `arecord -D hw:CARD=PCH,DEV=0 -f S16_LE -r 48000` works, but cpal's supported_input_configs enumeration for the same device reports only F32 variants and none of them open successfully at `build_input_stream` time with an ALSA `snd_pcm_hw_params` I/O error (errno 5). This is a known gap between cpal 0.15's ALSA backend and PipeWire's ALSA compatibility layer; it is a machine-specific hardware/config issue, not a code defect.
+
+**Workarounds for verification on a different machine or by a future phase:**
+- Run the smoke test on a machine whose default mic natively reports 48 kHz f32.
+- Or route `pw-loopback` output through to a test capture via `pw-cat --record - | ...` to verify the `voicegate_sink` half of the pipeline without needing live mic input.
+- Phase 2 will add rubato-based resampling and may also add capture-side resampling + i16-to-f32 conversion if this turns out to be common across target hardware. Track as new gap **G-014** below.
+
+**Severity:** **HIGH** for the pw-loopback discovery (the plan would have shipped a broken Linux path); **MEDIUM** for the partial smoke-test gap (the code is correct but cannot be proven end-to-end on this hardware). Moving both into the gap log so Phase 6 can audit whether the `pipewire-native` implementation also needs to use `pw-loopback`-equivalent semantics (it will: it needs to create a persistent virtual source, not a client-owned one), and so Phase 2 can decide whether to add capture-side format/rate conversion.
+
+### 6.4 Capture-side f32-only assumption is too strict for common hardware (Execution discovery, MEDIUM, G-014)
+
+**Gap:** Phase 1 `audio::capture::start_capture` requires the cpal input device to support exactly 48 kHz f32 because the ring buffer and the entire downstream pipeline are f32. Many common ALSA devices (including the integrated HDA on the test machine, a Realtek ALC623) expose only i16 in their cpal-enumerated supported configs even when the underlying hardware can do 48 kHz natively. `cpal::SampleFormat::I16` at 48 kHz is ruled out by `find_48khz_f32_channels`, producing a clean error but no usable capture stream.
+
+**Resolution (deferred to Phase 2):** Phase 2 introduces `rubato` for 48 kHz -> 16 kHz resampling for Silero VAD. While rewiring the capture path for Phase 2, also add:
+
+1. **Accept i16 and u16 capture formats** and convert to f32 in the callback:
+   - `i16 -> f32: sample as f32 / i16::MAX as f32`
+   - `u16 -> f32: (sample as f32 - i16::MAX as f32) / i16::MAX as f32`
+2. **Accept 44 100 Hz capture** and pre-resample in the worker (not the callback) to 48 000 Hz using rubato. This is additional to the 48 -> 16 kHz downsample for VAD. The output path stays pinned to 48 kHz because the virtual mic on both platforms expects 48 kHz.
+
+Do NOT add format conversion inside the cpal callback beyond a simple `as f32` cast for i16 -- anything more (u24, 24-bit packed) belongs in a pre-worker stage in the ring buffer pipeline.
+
+**Why not fix this in Phase 1:** the Phase 1 scope is identity passthrough, and adding format conversion + sample rate conversion compounds the risk of a Phase 1 that is supposed to be structurally minimal. Phase 2's `resampler.rs` is the natural home for this work since it already owns the rate-conversion path.
