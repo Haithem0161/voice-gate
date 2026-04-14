@@ -4466,6 +4466,7 @@ dependencies = [
  "ndarray 0.15.6",
  "ort",
  "pipewire",
+ "realfft",
  "ringbuf",
  "rubato",
  "serde",
