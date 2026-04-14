@@ -1,7 +1,7 @@
 # VoiceGate Status Tracker
 
-**Last updated:** 2026-04-14 (Phase 2 complete with load-bearing discrimination test PASSING)
-**Overall status:** Phases 1 and 2 complete. Phase 2's load-bearing gate passed with huge margin: `test_embedding_discrimination` reports cosine(speaker_a, speaker_b) = 0.018 vs a < 0.5 threshold, validating D-002R (WeSpeaker ResNet34-LM as primary speaker embedding model). 43/43 tests pass across all suites (32 lib + 9 ml integration + 2 ort smoke). Three new gaps discovered and FIXED in-pass during Phase 2 execution (G-017 ORT version 1.17 -> 1.22, G-018 WeSpeaker needs Kaldi fbank features not raw audio, G-019 Silero v5 needs a 64-sample context buffer prepended to each input chunk). Phase 1's G-015 and G-016 remain deferred to Phase 4 (they are pipeline-integration concerns, not ML-primitive concerns).
+**Last updated:** 2026-04-14 (Phase 3 complete — enrollment + profile.bin working end-to-end via --wav)
+**Overall status:** Phases 1, 2, and 3 complete. Phase 3's enrollment gate passes 8/8 with cosine(enrolled_centroid, fresh_same_speaker) = 0.612 and cosine(centroid, different_speaker) = 0.045. The centroid-averaging across 8 three-second segments widens the intra-vs-inter gap from Phase 2's 0.538 to 0.567. `voicegate enroll --wav` writes a 1040-byte profile.bin with VGPR magic, version 1, dim 256 (WeSpeaker per D-002R), embedding, and CRC32 checksum. 60/60 tests pass (41 lib + 8 enrollment + 9 ml + 2 ort smoke). One new gap G-020 discovered and FIXED in-pass (VAD segmentation needed a 512 ms intra-word silence tolerance). Phase 1's G-015 and G-016 remain deferred to Phase 4 and continue to block the `--mic` enrollment smoke test, but the `--mic` code path is implemented and compiles clean.
 
 ## Phase Status Table
 
@@ -9,7 +9,7 @@
 |---|-------|--------|---------|-----------|-------------|-----------|------------|------------------------|
 | 1 | Foundation Morph + Audio Passthrough | structurally complete (manual gate partial) | 2026-04-14 | 2026-04-14 | 11/11 | 6/0 | 17/16 (+ ctrlc via `cargo add`) | `devices`, `run --passthrough` |
 | 2 | ML Inference Primitives | complete (all 43 tests pass, discrimination cos = 0.018) | 2026-04-14 | 2026-04-14 | 5/4 (+ fbank) | 35/10 (fbank 8 + resampler 4 + embedding 5 + similarity 9 + vad integration 3 + discrimination 3 + math 3) | 18/16 (+ realfft via `cargo add`) | none |
-| 3 | Enrollment + CLI | not started | — | — | 0/3 | 0/8 | 0/1 | `enroll --wav`, `enroll --mic`, `enroll --list-passages` |
+| 3 | Enrollment + CLI | complete (8/8 enrollment tests pass, centroid cos = 0.612 / 0.045) | 2026-04-14 | 2026-04-14 | 3/3 | 17/8 (profile 9 unit + 5 integration + enroll 3 integration) | 19/17 (+ crc32fast via `cargo add`) | `enroll --wav`, `enroll --mic` (code-complete, hw-blocked), `enroll --list-passages` |
 | 4 | Gate + Pipeline Integration | not started | — | — | 0/4 | 0/11 | 0/0 | `run --headless` |
 | 5 | GUI | not started | — | — | 0/4 | 0/1 | 0/1 | `run` (default → GUI), main screen, enrollment wizard |
 | 6 | Cross-Platform Hardening + Release | not started | — | — | 0/2 | 0/7 | 0/1 | `doctor`, `enroll --anti-target`, AppImage, MSI |
@@ -102,9 +102,20 @@ Per-pass summary with counts and category breakdown. Updated after each pass.
 - **Distribution:** 3 HIGH, all fixed. 0 deferred.
 - **Report:** [PHASE-2-VERIFICATION.md](PHASE-2-VERIFICATION.md).
 
-### Pass 5+ — Continue until 0 true gaps
+### Pass 5 — Execution discovery (2026-04-14, Phase 3 runtime testing)
 
-Target: ≤5 passes total. Each pass appends subsections to affected phase files (6.1, 6.2, ...).
+- **Date:** 2026-04-14
+- **Method:** Running `voicegate enroll --wav tests/fixtures/speaker_a_enroll.wav` as the first end-to-end enrollment smoke test. Not a pre-execution audit; the single discovered gap surfaced on the first invocation.
+- **Gaps found:** 1 (MEDIUM, fixed in-pass).
+- **Absorbed into:**
+  - `src/enrollment/enroll.rs` — **G-020 (MEDIUM, FIXED)**: The original `segment_by_vad` cleared the `current_run` accumulator on every VAD-negative chunk. Natural running speech has lots of intra-word ~30 ms pauses that flip VAD below threshold transiently, so a single negative chunk between words was discarding seconds of preceding speech. On `speaker_a_enroll.wav` (29.4 s continuous speech) only 3 segments survived out of an achievable ~8-9. Fix: added `MAX_SILENT_CHUNKS_IN_RUN = 16` (= 512 ms). Pending silence is buffered in a side `Vec` and flushed into the current run on the next speech chunk; runs are only terminated when silence exceeds the tolerance. After the fix, the same audio cleanly produces 8 three-second segments. Code lands in commit `debfb1f`.
+- **Distribution:** 0 HIGH / 1 MEDIUM / 0 LOW, all fixed in-pass.
+- **Load-bearing result:** `test_enroll_from_wav` returns `cosine(centroid, fresh_A) = 0.612` and `test_enroll_discrimination` returns `cosine(centroid_A, speaker_b) = 0.045`. The intra/inter gap widens from Phase 2's 0.538 single-window value to Phase 3's 0.567 centroid value, confirming the theoretical denoising benefit of multi-segment averaging.
+- **Report:** [PHASE-3-VERIFICATION.md](PHASE-3-VERIFICATION.md).
+
+### Pass 6+ — Continue until 0 true gaps
+
+Target: ≤6 passes total. Each pass appends subsections to affected phase files (6.1, 6.2, ...).
 
 ### Verification Pass — Final
 
