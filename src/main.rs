@@ -83,7 +83,15 @@ enum Commands {
         /// Override the input device (only applies to --mic mode).
         #[arg(long, value_name = "NAME")]
         device: Option<String>,
+
+        /// Record as an anti-target instead of the primary voice.
+        /// Requires an existing profile. Appends to the anti-target list.
+        #[arg(long, value_name = "NAME")]
+        anti_target: Option<String>,
     },
+
+    /// Diagnose the environment: audio server, models, profile, devices.
+    Doctor,
 }
 
 fn main() -> Result<()> {
@@ -115,7 +123,9 @@ fn main() -> Result<()> {
             list_passages,
             output,
             device,
-        } => cmd_enroll(wav, mic, list_passages, output, device),
+            anti_target,
+        } => cmd_enroll(wav, mic, list_passages, output, device, anti_target),
+        Commands::Doctor => cmd_doctor(),
     }
 }
 
@@ -397,12 +407,14 @@ fn cmd_enroll(
     list_passages: bool,
     output: Option<PathBuf>,
     device: Option<String>,
+    anti_target: Option<String>,
 ) -> Result<()> {
-    // Exactly one of the three modes must be specified. clap's
-    // conflicts_with_all already prevents multiple, but we still need to
-    // reject the "none" case.
     if list_passages {
         return cmd_enroll_list_passages();
+    }
+
+    if let Some(at_name) = anti_target {
+        return cmd_enroll_anti_target(at_name, wav, mic, device);
     }
 
     match (wav, mic) {
@@ -521,6 +533,139 @@ fn cmd_enroll_mic(seconds: u32, output: Option<PathBuf>, device: Option<String>)
     let out_path = resolve_profile_output(output)?;
     profile.save(&out_path)?;
     println!("Profile saved: {}", out_path.display());
+    Ok(())
+}
+
+fn cmd_enroll_anti_target(
+    name: String,
+    wav: Option<PathBuf>,
+    mic: Option<u32>,
+    _device: Option<String>,
+) -> Result<()> {
+    use voicegate::enrollment::anti_target::{AntiTarget, MAX_ANTI_TARGETS};
+
+    let profile_path = Profile::default_path()?;
+    let mut profile = Profile::load(&profile_path)
+        .map_err(|_| anyhow::anyhow!("no existing profile found. Enroll your own voice first."))?;
+
+    if profile.anti_targets.len() >= MAX_ANTI_TARGETS {
+        anyhow::bail!(
+            "maximum anti-targets ({MAX_ANTI_TARGETS}) reached. Remove one before adding another."
+        );
+    }
+    if profile.anti_targets.iter().any(|at| at.name == name) {
+        anyhow::bail!("anti-target '{name}' already exists. Use a different name.");
+    }
+
+    let audio_16k = match (wav, mic) {
+        (Some(path), None) => read_wav_as_16k_mono(&path)?,
+        (None, Some(_seconds)) => {
+            anyhow::bail!("--mic for anti-target enrollment is not yet supported. Use --wav.");
+        }
+        _ => anyhow::bail!("specify --wav <path> for anti-target enrollment"),
+    };
+
+    let silero_path = resolve_model_path("silero_vad.onnx")?;
+    let wespeaker_path = resolve_model_path("wespeaker_resnet34_lm.onnx")?;
+    let vad = SileroVad::load(&silero_path)?;
+    let ecapa = EcapaTdnn::load(&wespeaker_path)?;
+    let mut session = EnrollmentSession::new(vad, ecapa);
+    session.push_audio(&audio_16k);
+    let centroid = session.finalize()?;
+
+    profile
+        .anti_targets
+        .push(AntiTarget::new(name.clone(), centroid));
+    profile.save(&profile_path)?;
+
+    println!(
+        "Anti-target '{name}' added. Profile now has {} anti-target(s).",
+        profile.anti_targets.len()
+    );
+    Ok(())
+}
+
+fn cmd_doctor() -> Result<()> {
+    println!("VoiceGate Diagnostics");
+    println!("=====================");
+
+    // Platform
+    println!(
+        "Platform:         {} ({})",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
+
+    // Audio server (Linux only)
+    #[cfg(target_os = "linux")]
+    {
+        use voicegate::audio::audio_server::detect_audio_server;
+        let server = detect_audio_server();
+        println!("Audio server:     {server}");
+    }
+
+    // Models
+    let silero_status = match resolve_model_path("silero_vad.onnx") {
+        Ok(p) => {
+            let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+            format!(
+                "Found ({}, {:.1} MB)",
+                p.display(),
+                size as f64 / 1_048_576.0
+            )
+        }
+        Err(_) => "Missing (run `make models`)".to_string(),
+    };
+    println!("Silero VAD:       {silero_status}");
+
+    let ecapa_status = match resolve_model_path("wespeaker_resnet34_lm.onnx") {
+        Ok(p) => {
+            let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+            format!(
+                "Found ({}, {:.1} MB)",
+                p.display(),
+                size as f64 / 1_048_576.0
+            )
+        }
+        Err(_) => "Missing (run `make models`)".to_string(),
+    };
+    println!("WeSpeaker:        {ecapa_status}");
+
+    // Profile
+    let profile_status = match Profile::default_path() {
+        Ok(p) if p.exists() => match Profile::load(&p) {
+            Ok(prof) => format!(
+                "Found ({}, version {}, {} anti-target(s))",
+                p.display(),
+                prof.version,
+                prof.anti_targets.len()
+            ),
+            Err(e) => format!("Corrupt ({}): {e}", p.display()),
+        },
+        Ok(p) => format!("Not found ({})", p.display()),
+        Err(e) => format!("Cannot resolve path: {e}"),
+    };
+    println!("Profile:          {profile_status}");
+
+    // Config
+    let config_status = match voicegate::config::Config::default_path() {
+        Some(p) if p.exists() => format!("Found ({})", p.display()),
+        Some(p) => format!("Not found, using defaults ({})", p.display()),
+        None => "Cannot resolve config dir".to_string(),
+    };
+    println!("Config:           {config_status}");
+
+    // Input devices
+    match list_input_devices() {
+        Ok(devs) => {
+            let default = devs.iter().find(|(_, d)| *d).map(|(n, _)| n.as_str());
+            println!("Default input:    {}", default.unwrap_or("(none)"));
+        }
+        Err(e) => println!("Default input:    Error: {e}"),
+    }
+
+    println!();
+    println!("Done.");
     Ok(())
 }
 
