@@ -1,10 +1,26 @@
 # Rust
-backend/target/
+target/
 **/*.rs.bk
+Cargo.lock.bak
+
+# ONNX models (fetched via `make models`, too large for git)
+models/*.onnx
+models/tmp_model/
+models/*.tar.gz
+models/*.tgz
+
+# Enrolled profiles (user data, never commit)
+*.bin
+!models/.gitkeep
+!tests/fixtures/.gitkeep
 
 # Environment files
 .env
-backend/.env
+.env.*
+!.env.example
+
+# Test fixture audio (fetched or generated locally; keep the dir via .gitkeep)
+tests/fixtures/*.wav
 
 # IDE
 .vscode/
@@ -17,5 +33,13 @@ backend/.env
 .DS_Store
 Thumbs.db
 
-# Logs
+# Logs + profiling
 *.log
+flamegraph.svg
+perf.data
+perf.data.old
+
+# Python (for scripts/)
+scripts/__pycache__/
+scripts/.venv/
+*.pyc

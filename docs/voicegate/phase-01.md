@@ -473,7 +473,7 @@ Out of scope for Phase 1 (not in PRD §13 success criteria, and reconnect logic 
 2. `cargo clippy -- -D warnings` is clean.
 3. `cargo fmt --check` is clean.
 4. `cargo build --release` produces `target/release/voicegate`.
-5. `grep -riE 'sqlx|axum|utoipa|postgres|diesel|jwt' CLAUDE.md .claude/rules/ src/` returns **zero** matches. This catches backend-idiom residue in rewritten files.
+5. `grep -riE 'sqlx|axum|utoipa|postgres|diesel|jwt' CLAUDE.md src/ $(ls .claude/rules/*.md | grep -v planning.md)` returns **zero** matches. This catches backend-idiom residue in rewritten files. `planning.md` is excluded from the grep because its "Desktop App Adaptation" header note intentionally references the old SQLx/Axum template when explaining the adapted 7-section phase template; the grep would otherwise flag those intentional references as residue.
 6. Directory listing `ls .claude/rules/` matches exactly: `audio-io.md cross-platform.md gui.md ml-inference.md module-boundaries.md planning.md rust-desktop.md testing.md`. None of the deleted files remain.
 
 ### Manual smoke tests (Linux)

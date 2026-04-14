@@ -10,6 +10,8 @@ paths:
 
 # Development Plan Writing Rules
 
+> **Desktop App Adaptation (VoiceGate):** The phase-file template below is the original SQLx/Axum version. VoiceGate is a Rust desktop app with no database, no HTTP API, and no ORM. Phase files under `docs/voicegate/` use an **adapted 7-section template** — see the table at the end of this file. The rest of the methodology (roadmap, research log, gap analysis passes, verification YAML) applies unchanged.
+
 All development plans follow a structured methodology. Plans live in `docs/<plan-name>/` and consist of 6 mandatory files.
 
 ## Plan Structure
@@ -172,3 +174,37 @@ gaps: [...]
 - Frontend summary MUST be updated after EACH phase, not batched at the end
 - Phase sizes: S (<5 routes), M (5-15 routes), L (15-25 routes), XL (25+ routes or complex engines)
 - Gap severity: CRITICAL = blocks other phases, HIGH = missing core functionality, MEDIUM = missing enhancement, LOW = nice-to-have
+
+---
+
+## Desktop App Phase Template (VoiceGate)
+
+VoiceGate is a Rust desktop binary, not a backend API. The SQLx migrations / DDD layering / Axum routes sections do not apply. Phase files under `docs/voicegate/` use these **7 sections in order**:
+
+| # | Section | Purpose |
+|---|---------|---------|
+| 1 | **Module & File Changes** | Exact paths to create / modify / delete under `src/`, `scripts/`, `models/`, `tests/fixtures/`, `assets/`. Replaces "SQLx Migration Changes". |
+| 2 | **Dependencies & Build Config** | New `Cargo.toml` entries (crate, version, features, `[target.'cfg(...)'.dependencies]`), feature flags, `[profile.release]` changes, ONNX Runtime shared library handling, Python model-download scripts. |
+| 3 | **Types, Traits & Public API** | Struct definitions with derives, trait signatures (`VirtualMic`, `SpeakerVerifier`, `AudioGate`), `thiserror` error enums, config struct additions. This is the contract surface and replaces "DDD Implementation". |
+| 4 | **Runtime Behavior** | Numbered step-by-step logic per subsystem. Threading model ownership (which thread owns what). Real-time constraints: MUST NOT allocate / lock / block in audio callbacks. Ring-buffer sizing. ONNX session lifetime. Stateful model state (Silero VAD GRU) persistence. EMA + hysteresis math. Replaces "Business Logic". |
+| 5 | **Cross-Platform & Resource Handling** | `#[cfg(target_os)]` split points. File-path resolution via `dirs`. Model asset lookup. Permission/capability errors (PipeWire perms, VB-Cable missing). Graceful device disconnect. Replaces "Infrastructure Updates". |
+| 6 | **Verification** | Concrete commands: `cargo check`, `cargo clippy -- -D warnings`, `cargo test <specific_test_name>`, manual smoke tests. Phase-specific acceptance thresholds (discrimination cosine < 0.5, latency < 50 ms, CPU < 10%). |
+| 6+ | **PRD Gap Additions** | Same methodology as above — numbered 6.1, 6.2, ... appended by gap-analysis passes. |
+
+**Roadmap table adaptations for VoiceGate:**
+- "New Entities by Phase" -> **"New Modules by Phase"** (Rust source modules under `src/`)
+- "New Business Engines by Phase" -> **"New ONNX Models & External Assets by Phase"** (ONNX files, shell scripts, fixture WAVs)
+
+**Phase size rubric for VoiceGate** (replaces the route-count rubric, which does not apply):
+- **S**: <3 new modules, no new crates
+- **M**: 3-6 new modules or 1-3 new crates
+- **L**: >6 new modules OR requires a new ONNX model OR introduces a new platform backend
+- **XL**: Reserved for v2+ items
+
+**Always-applicable rules** (unchanged from the backend template):
+- Verification steps MUST be concrete
+- Frontend summary updated after EACH phase, not batched
+- Gap severity CRITICAL/HIGH/MEDIUM/LOW, same meaning
+- Iterative passes until 0 true gaps
+- Final YAML verification report
+
