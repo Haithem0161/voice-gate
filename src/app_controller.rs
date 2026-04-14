@@ -89,31 +89,68 @@ impl AppController {
 
         let input_dev = config.audio.input_device.clone();
         let capture = start_capture(Some(&input_dev), input_prod)?;
+        let capture_rate = capture.sample_rate;
         let output = start_output(&output_device_name, output_cons)?;
 
         let shutdown = Arc::new(AtomicBool::new(false));
         let worker_shutdown = shutdown.clone();
         let frame_samples = config.audio.frame_size_samples();
+        let needs_resample = capture_rate != 48_000;
 
         let worker = thread::spawn(move || {
+            let mut pre_resampler = if needs_resample {
+                Some(
+                    crate::audio::resampler::CaptureResampler::new(capture_rate, 48_000)
+                        .expect("pre-resampler"),
+                )
+            } else {
+                None
+            };
+            let mut resample_buf: Vec<f32> = Vec::with_capacity(8192);
+            let mut frame48k_accum: Vec<f32> = Vec::with_capacity(frame_samples * 2);
+            let mut raw_scratch = vec![0.0f32; 4096];
             let mut frame = vec![0.0f32; frame_samples];
+
             while !worker_shutdown.load(Ordering::Relaxed) {
-                let mut got = 0;
-                while got < frame_samples {
-                    if worker_shutdown.load(Ordering::Relaxed) {
-                        return;
-                    }
-                    let n = input_cons.pop_slice(&mut frame[got..]);
-                    got += n;
+                if let Some(ref mut resampler) = pre_resampler {
+                    let n = input_cons.pop_slice(&mut raw_scratch);
                     if n == 0 {
                         thread::sleep(Duration::from_micros(500));
+                        continue;
                     }
+                    resample_buf.clear();
+                    if let Err(e) = resampler.process(&raw_scratch[..n], &mut resample_buf) {
+                        tracing::error!("pre-resample error: {e}");
+                        continue;
+                    }
+                    frame48k_accum.extend_from_slice(&resample_buf);
+                    while frame48k_accum.len() >= frame_samples {
+                        frame.copy_from_slice(&frame48k_accum[..frame_samples]);
+                        frame48k_accum.drain(..frame_samples);
+                        if let Err(e) = pipeline.process_frame(&mut frame) {
+                            tracing::error!("pipeline error: {e}");
+                            frame.fill(0.0);
+                        }
+                        output_prod.push_slice(&frame);
+                    }
+                } else {
+                    let mut got = 0;
+                    while got < frame_samples {
+                        if worker_shutdown.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        let n = input_cons.pop_slice(&mut frame[got..]);
+                        got += n;
+                        if n == 0 {
+                            thread::sleep(Duration::from_micros(500));
+                        }
+                    }
+                    if let Err(e) = pipeline.process_frame(&mut frame) {
+                        tracing::error!("pipeline error: {e}");
+                        frame.fill(0.0);
+                    }
+                    output_prod.push_slice(&frame);
                 }
-                if let Err(e) = pipeline.process_frame(&mut frame) {
-                    tracing::error!("pipeline error: {e}");
-                    frame.fill(0.0);
-                }
-                output_prod.push_slice(&frame);
             }
         });
 

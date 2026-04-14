@@ -11,7 +11,7 @@ use tracing_subscriber::EnvFilter;
 
 use voicegate::audio::capture::{list_input_devices, start_capture};
 use voicegate::audio::output::{list_output_devices, start_output};
-use voicegate::audio::resampler::{Resampler48to16, INPUT_CHUNK_SAMPLES};
+use voicegate::audio::resampler::{CaptureResampler, Resampler48to16, INPUT_CHUNK_SAMPLES};
 use voicegate::audio::ring_buffer::{new_audio_ring, RING_CAPACITY_SAMPLES};
 use voicegate::audio::virtual_mic::create_virtual_mic;
 use voicegate::config::Config;
@@ -162,17 +162,14 @@ fn cmd_run_passthrough() -> Result<()> {
     // 3. Start the capture stream (pushes into input ring).
     let input_requested = config.audio.input_device.as_str();
     let capture = start_capture(Some(input_requested), input_prod)?;
-    tracing::info!(device = %capture.device_name, "capture started");
+    let capture_rate = capture.sample_rate;
+    tracing::info!(device = %capture.device_name, rate = capture_rate, "capture started");
 
-    // 4. Start the output stream BEFORE the worker so the consumer is alive
-    //    when the worker starts pushing. Order matters: we want the output
-    //    callback primed to read from the output ring as soon as samples
-    //    arrive from the worker.
+    // 4. Start the output stream.
     let output = start_output(&output_device_name, output_cons)?;
     tracing::info!(device = %output.device_name, "output started");
 
-    // 5. Install Ctrl-C handler. On signal, flip the shutdown bool and let
-    //    the worker loop break on its next iteration.
+    // 5. Install Ctrl-C handler.
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_signal = shutdown.clone();
     ctrlc::set_handler(move || {
@@ -181,27 +178,35 @@ fn cmd_run_passthrough() -> Result<()> {
     })
     .map_err(|e| anyhow::anyhow!("install ctrl-c handler: {e}"))?;
 
-    // 6. Spawn the passthrough worker. Moves the consumer/producer halves
-    //    of both ring buffers so the worker fully owns the data path.
+    // 6. Spawn the passthrough worker. If the capture rate is not 48kHz,
+    //    resample before pushing to the output ring.
     let worker_shutdown = shutdown.clone();
-    let frame_samples = config.audio.frame_size_samples();
+    let needs_resample = capture_rate != 48_000;
     let worker = thread::spawn(move || {
-        // Pre-allocate the scratch frame once, outside the hot loop.
-        let mut scratch = vec![0.0f32; frame_samples];
+        let mut scratch = vec![0.0f32; 4096];
+        let mut pre_resampler = if needs_resample {
+            Some(CaptureResampler::new(capture_rate, 48_000).expect("pre-resampler"))
+        } else {
+            None
+        };
+        let mut resample_buf = Vec::with_capacity(8192);
 
         while !worker_shutdown.load(Ordering::Relaxed) {
             let n = input_cons.pop_slice(&mut scratch);
             if n == 0 {
-                // Ring under-full; wait briefly for the capture callback to
-                // push more. 500 us is short enough to stay responsive but
-                // long enough to avoid burning 100% CPU.
                 thread::sleep(Duration::from_micros(500));
                 continue;
             }
-            // Push as much as fits. If the output ring is full we drop;
-            // the output callback will zero-fill, which sounds like a brief
-            // tick but is better than blocking the worker.
-            output_prod.push_slice(&scratch[..n]);
+            if let Some(ref mut resampler) = pre_resampler {
+                resample_buf.clear();
+                if let Err(e) = resampler.process(&scratch[..n], &mut resample_buf) {
+                    tracing::error!("pre-resample error: {e}");
+                    continue;
+                }
+                output_prod.push_slice(&resample_buf);
+            } else {
+                output_prod.push_slice(&scratch[..n]);
+            }
         }
         tracing::info!("passthrough worker exiting");
     });
@@ -283,7 +288,8 @@ fn cmd_run_headless(
         .as_deref()
         .unwrap_or(&config.audio.input_device);
     let capture = start_capture(Some(input_dev), input_prod)?;
-    tracing::info!(device = %capture.device_name, "capture started");
+    let capture_rate = capture.sample_rate;
+    tracing::info!(device = %capture.device_name, rate = capture_rate, "capture started");
 
     let output = start_output(&output_device_name, output_cons)?;
     tracing::info!(device = %output.device_name, "output started");
@@ -298,27 +304,62 @@ fn cmd_run_headless(
 
     let worker_shutdown = shutdown.clone();
     let frame_samples = config.audio.frame_size_samples();
+    let needs_resample = capture_rate != 48_000;
     let worker = thread::spawn(move || {
+        let mut pre_resampler = if needs_resample {
+            Some(CaptureResampler::new(capture_rate, 48_000).expect("pre-resampler"))
+        } else {
+            None
+        };
+        let mut resample_buf: Vec<f32> = Vec::with_capacity(8192);
+        let mut frame48k_accum: Vec<f32> = Vec::with_capacity(frame_samples * 2);
+        let mut raw_scratch = vec![0.0f32; 4096];
         let mut frame = vec![0.0f32; frame_samples];
+
         while !worker_shutdown.load(Ordering::Relaxed) {
-            let mut got = 0;
-            while got < frame_samples {
-                if worker_shutdown.load(Ordering::Relaxed) {
-                    return;
-                }
-                let n = input_cons.pop_slice(&mut frame[got..]);
-                got += n;
+            if let Some(ref mut resampler) = pre_resampler {
+                // Read raw samples from input ring, resample to 48kHz,
+                // accumulate, then process in frame_samples chunks.
+                let n = input_cons.pop_slice(&mut raw_scratch);
                 if n == 0 {
                     thread::sleep(Duration::from_micros(500));
+                    continue;
                 }
-            }
+                resample_buf.clear();
+                if let Err(e) = resampler.process(&raw_scratch[..n], &mut resample_buf) {
+                    tracing::error!("pre-resample error: {e}");
+                    continue;
+                }
+                frame48k_accum.extend_from_slice(&resample_buf);
 
-            if let Err(e) = pipeline.process_frame(&mut frame) {
-                tracing::error!("pipeline error: {e}");
-                frame.fill(0.0);
+                while frame48k_accum.len() >= frame_samples {
+                    frame.copy_from_slice(&frame48k_accum[..frame_samples]);
+                    frame48k_accum.drain(..frame_samples);
+                    if let Err(e) = pipeline.process_frame(&mut frame) {
+                        tracing::error!("pipeline error: {e}");
+                        frame.fill(0.0);
+                    }
+                    output_prod.push_slice(&frame);
+                }
+            } else {
+                // Direct 48kHz path
+                let mut got = 0;
+                while got < frame_samples {
+                    if worker_shutdown.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let n = input_cons.pop_slice(&mut frame[got..]);
+                    got += n;
+                    if n == 0 {
+                        thread::sleep(Duration::from_micros(500));
+                    }
+                }
+                if let Err(e) = pipeline.process_frame(&mut frame) {
+                    tracing::error!("pipeline error: {e}");
+                    frame.fill(0.0);
+                }
+                output_prod.push_slice(&frame);
             }
-
-            output_prod.push_slice(&frame);
         }
         tracing::info!("pipeline worker exiting");
     });
