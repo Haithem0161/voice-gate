@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -10,9 +11,14 @@ use tracing_subscriber::EnvFilter;
 
 use voicegate::audio::capture::{list_input_devices, start_capture};
 use voicegate::audio::output::{list_output_devices, start_output};
+use voicegate::audio::resampler::{Resampler48to16, INPUT_CHUNK_SAMPLES};
 use voicegate::audio::ring_buffer::{new_audio_ring, RING_CAPACITY_SAMPLES};
 use voicegate::audio::virtual_mic::create_virtual_mic;
 use voicegate::config::Config;
+use voicegate::enrollment::enroll::EnrollmentSession;
+use voicegate::enrollment::profile::Profile;
+use voicegate::ml::embedding::EcapaTdnn;
+use voicegate::ml::vad::SileroVad;
 
 #[derive(Parser)]
 #[command(
@@ -36,6 +42,35 @@ enum Commands {
         #[arg(long)]
         passthrough: bool,
     },
+
+    /// Enroll a voice. Exactly one of --wav, --mic, or --list-passages must be provided.
+    Enroll {
+        /// Read audio from a WAV file. Supports 16 kHz (passthrough) and
+        /// 48 kHz (auto-downsampled) mono/stereo WAVs. Other rates must
+        /// be converted to 16 kHz first via `ffmpeg -ac 1 -ar 16000`.
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["mic", "list_passages"])]
+        wav: Option<PathBuf>,
+
+        /// Record `N` seconds of live audio from the default (or --device) mic.
+        /// Note: on Phase 3's dev hardware, cpal's ALSA backend may not be
+        /// able to open the default mic at 48 kHz f32 due to G-015 (documented
+        /// in phase-01.md). If --mic fails with an I/O error, use --wav with
+        /// a pre-recorded WAV instead.
+        #[arg(long, value_name = "SECONDS", conflicts_with_all = ["wav", "list_passages"])]
+        mic: Option<u32>,
+
+        /// Print the enrollment passage from assets/enrollment_passages.txt and exit.
+        #[arg(long)]
+        list_passages: bool,
+
+        /// Override the output profile path. Defaults to the platform data dir.
+        #[arg(long, value_name = "PATH")]
+        output: Option<PathBuf>,
+
+        /// Override the input device (only applies to --mic mode).
+        #[arg(long, value_name = "NAME")]
+        device: Option<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -48,6 +83,13 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Devices => cmd_devices(),
         Commands::Run { passthrough } => cmd_run(passthrough),
+        Commands::Enroll {
+            wav,
+            mic,
+            list_passages,
+            output,
+            device,
+        } => cmd_enroll(wav, mic, list_passages, output, device),
     }
 }
 
@@ -172,4 +214,290 @@ fn cmd_run(passthrough: bool) -> Result<()> {
 
     tracing::info!("shutdown complete");
     Ok(())
+}
+
+// --- Enrollment ------------------------------------------------------------
+
+fn cmd_enroll(
+    wav: Option<PathBuf>,
+    mic: Option<u32>,
+    list_passages: bool,
+    output: Option<PathBuf>,
+    device: Option<String>,
+) -> Result<()> {
+    // Exactly one of the three modes must be specified. clap's
+    // conflicts_with_all already prevents multiple, but we still need to
+    // reject the "none" case.
+    if list_passages {
+        return cmd_enroll_list_passages();
+    }
+
+    match (wav, mic) {
+        (Some(path), None) => cmd_enroll_wav(path, output),
+        (None, Some(seconds)) => cmd_enroll_mic(seconds, output, device),
+        (None, None) => anyhow::bail!(
+            "must specify exactly one of --wav <path>, --mic <seconds>, or --list-passages"
+        ),
+        (Some(_), Some(_)) => unreachable!("clap conflicts_with_all prevents this"),
+    }
+}
+
+fn cmd_enroll_list_passages() -> Result<()> {
+    let path = resolve_asset_path("enrollment_passages.txt")?;
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| anyhow::anyhow!("read {}: {e}", path.display()))?;
+    print!("{text}");
+    Ok(())
+}
+
+fn cmd_enroll_wav(wav_path: PathBuf, output: Option<PathBuf>) -> Result<()> {
+    println!("Reading WAV file: {}", wav_path.display());
+    let audio_16k = read_wav_as_16k_mono(&wav_path)?;
+    let duration_s = audio_16k.len() as f32 / 16_000.0;
+    println!("Loaded {duration_s:.1} s of 16 kHz mono audio");
+
+    // Load models. Resolution order: env var override -> executable-relative
+    // -> repo-relative (dev mode).
+    let silero_path = resolve_model_path("silero_vad.onnx")?;
+    let wespeaker_path = resolve_model_path("wespeaker_resnet34_lm.onnx")?;
+    let vad = SileroVad::load(&silero_path)?;
+    let ecapa = EcapaTdnn::load(&wespeaker_path)?;
+    let mut session = EnrollmentSession::new(vad, ecapa);
+
+    session.push_audio(&audio_16k);
+    if !session.is_ready() {
+        tracing::warn!(
+            duration_s,
+            "enrollment audio is shorter than the recommended 20 s minimum; \
+             finalize() may fail if fewer than 5 speech segments are found"
+        );
+    }
+
+    let centroid = session.finalize()?;
+    let profile = Profile::new(centroid);
+
+    let out_path = resolve_profile_output(output)?;
+    profile.save(&out_path)?;
+    println!("Profile saved: {}", out_path.display());
+    Ok(())
+}
+
+fn cmd_enroll_mic(seconds: u32, output: Option<PathBuf>, device: Option<String>) -> Result<()> {
+    println!("Recording for {seconds} seconds. Read the passage aloud:");
+    println!();
+    let passage = std::fs::read_to_string(resolve_asset_path("enrollment_passages.txt")?)
+        .unwrap_or_else(|_| {
+            String::from("(passage file missing -- speak naturally for the duration)\n")
+        });
+    print!("{passage}");
+    println!();
+
+    // Load models up front so the user gets feedback if the ORT runtime
+    // or model files are missing, before we start hitting the mic.
+    let silero_path = resolve_model_path("silero_vad.onnx")?;
+    let wespeaker_path = resolve_model_path("wespeaker_resnet34_lm.onnx")?;
+    let vad = SileroVad::load(&silero_path)?;
+    let ecapa = EcapaTdnn::load(&wespeaker_path)?;
+    let mut session = EnrollmentSession::new(vad, ecapa);
+
+    // Set up the capture ring buffer and stream. Mic enrollment does NOT
+    // touch the virtual microphone -- we only need the input half of the
+    // audio pipeline.
+    let (input_prod, mut input_cons) = new_audio_ring(RING_CAPACITY_SAMPLES);
+    let device_ref = device.as_deref();
+    let capture = start_capture(device_ref, input_prod)?;
+    tracing::info!(device = %capture.device_name, "enroll mic capture started");
+
+    // Resampler: cpal captures at 48 kHz, enrollment needs 16 kHz.
+    let mut resampler = Resampler48to16::new()?;
+    let mut scratch = vec![0.0f32; INPUT_CHUNK_SAMPLES];
+
+    let start = std::time::Instant::now();
+    let target_duration = Duration::from_secs(u64::from(seconds));
+    let mut last_progress_tick = std::time::Instant::now();
+    print!("Recording: ");
+    std::io::Write::flush(&mut std::io::stdout()).ok();
+
+    while start.elapsed() < target_duration {
+        let n = input_cons.pop_slice(&mut scratch);
+        if n == 0 {
+            thread::sleep(Duration::from_micros(500));
+            continue;
+        }
+        if n == INPUT_CHUNK_SAMPLES {
+            // Full frame -- resample to 16 kHz and push to enrollment.
+            let out = resampler.process_block(&scratch)?;
+            session.push_audio(out);
+        }
+        // Progress dot every 1 s.
+        if last_progress_tick.elapsed() >= Duration::from_secs(1) {
+            print!(".");
+            std::io::Write::flush(&mut std::io::stdout()).ok();
+            last_progress_tick = std::time::Instant::now();
+        }
+    }
+    println!();
+
+    // Stop the capture stream explicitly so no more callbacks fire while
+    // we finalize.
+    drop(capture);
+
+    let centroid = session.finalize()?;
+    let profile = Profile::new(centroid);
+
+    let out_path = resolve_profile_output(output)?;
+    profile.save(&out_path)?;
+    println!("Profile saved: {}", out_path.display());
+    Ok(())
+}
+
+// --- Helpers ---------------------------------------------------------------
+
+/// Read a WAV file of any int or float format, any mono/stereo/multi-channel
+/// layout, at 16 kHz or 48 kHz, and return a 16 kHz mono f32 Vec in
+/// `[-1, 1]` range.
+///
+/// Other sample rates return a clear error with an ffmpeg hint. Phase 3
+/// only supports the two rates we actually use (capture is 48 kHz, fixtures
+/// are 16 kHz). A more general resampler path is Phase 4+ territory.
+fn read_wav_as_16k_mono(path: &Path) -> Result<Vec<f32>> {
+    let mut reader = hound::WavReader::open(path)
+        .map_err(|e| anyhow::anyhow!("open {}: {e}", path.display()))?;
+    let spec = reader.spec();
+    tracing::info!(
+        path = %path.display(),
+        channels = spec.channels,
+        sample_rate = spec.sample_rate,
+        bits = spec.bits_per_sample,
+        sample_format = ?spec.sample_format,
+        "reading WAV"
+    );
+
+    // Read samples as interleaved f32.
+    let interleaved: Vec<f32> = match spec.sample_format {
+        hound::SampleFormat::Float => reader
+            .samples::<f32>()
+            .collect::<Result<Vec<f32>, _>>()
+            .map_err(|e| anyhow::anyhow!("read f32 samples: {e}"))?,
+        hound::SampleFormat::Int => {
+            let bits = spec.bits_per_sample;
+            let scale = (1i64 << (bits - 1)) as f32;
+            reader
+                .samples::<i32>()
+                .map(|s| s.map(|v| v as f32 / scale))
+                .collect::<Result<Vec<f32>, _>>()
+                .map_err(|e| anyhow::anyhow!("read int samples: {e}"))?
+        }
+    };
+
+    // Deinterleave: mono stream is the average across channels.
+    let channels = spec.channels as usize;
+    let mono: Vec<f32> = if channels == 1 {
+        interleaved
+    } else {
+        let n_frames = interleaved.len() / channels;
+        let mut out = Vec::with_capacity(n_frames);
+        for frame_idx in 0..n_frames {
+            let mut sum = 0.0f32;
+            for ch in 0..channels {
+                sum += interleaved[frame_idx * channels + ch];
+            }
+            out.push(sum / channels as f32);
+        }
+        out
+    };
+
+    // Resample to 16 kHz if needed.
+    match spec.sample_rate {
+        16_000 => Ok(mono),
+        48_000 => {
+            // Use the same Resampler48to16 that the live pipeline uses.
+            let mut resampler = Resampler48to16::new()?;
+            let mut output = Vec::with_capacity(mono.len() / 3 + 1024);
+            let mut offset = 0;
+            while offset + INPUT_CHUNK_SAMPLES <= mono.len() {
+                let block = &mono[offset..offset + INPUT_CHUNK_SAMPLES];
+                let out = resampler.process_block(block)?;
+                output.extend_from_slice(out);
+                offset += INPUT_CHUNK_SAMPLES;
+            }
+            // Tail samples (<1536) are dropped. For a 29 s clip that's at
+            // most 1535 samples = 96 ms, which is shorter than the VAD
+            // chunk size and would be discarded anyway.
+            Ok(output)
+        }
+        other => anyhow::bail!(
+            "unsupported WAV sample rate {other} Hz. Phase 3 only handles 16 kHz and 48 kHz. \
+             Convert first with: ffmpeg -i {} -ac 1 -ar 16000 <output.wav>",
+            path.display()
+        ),
+    }
+}
+
+/// Resolve an asset file name (e.g. `enrollment_passages.txt`) via the
+/// lookup order documented in phase-03 section 5.2.
+fn resolve_asset_path(name: &str) -> Result<PathBuf> {
+    // 1. Env var override.
+    if let Ok(dir) = std::env::var("VOICEGATE_ASSETS_DIR") {
+        let candidate = PathBuf::from(dir).join(name);
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    // 2. Executable-relative (packaged builds).
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join("assets").join(name);
+            if candidate.exists() {
+                return Ok(candidate);
+            }
+        }
+    }
+    // 3. Repo-relative (dev builds).
+    let candidate = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("assets")
+        .join(name);
+    if candidate.exists() {
+        return Ok(candidate);
+    }
+    anyhow::bail!(
+        "asset {name} not found. Set VOICEGATE_ASSETS_DIR or place it next to the executable."
+    )
+}
+
+/// Resolve a model file name (e.g. `silero_vad.onnx`) via an analogous
+/// lookup order: env var -> executable-relative -> repo-relative.
+fn resolve_model_path(name: &str) -> Result<PathBuf> {
+    if let Ok(dir) = std::env::var("VOICEGATE_MODELS_DIR") {
+        let candidate = PathBuf::from(dir).join(name);
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join("models").join(name);
+            if candidate.exists() {
+                return Ok(candidate);
+            }
+        }
+    }
+    let candidate = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("models")
+        .join(name);
+    if candidate.exists() {
+        return Ok(candidate);
+    }
+    anyhow::bail!(
+        "model {name} not found. Run `make models` to download it, or set VOICEGATE_MODELS_DIR."
+    )
+}
+
+/// Resolve the output profile path. Uses the explicit CLI arg first; falls
+/// back to `Profile::default_path()`.
+fn resolve_profile_output(cli_arg: Option<PathBuf>) -> Result<PathBuf> {
+    if let Some(p) = cli_arg {
+        return Ok(p);
+    }
+    Profile::default_path()
 }

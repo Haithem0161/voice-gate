@@ -44,6 +44,20 @@ pub const MIN_SEGMENTS: usize = 5;
 /// dropped to bound the amount of ONNX inference `finalize` does.
 pub const MAX_SEGMENTS: usize = 12;
 
+/// How many consecutive silent 32 ms chunks are tolerated inside a
+/// speech run before the run is flushed. 16 chunks = 512 ms, which
+/// covers normal between-word pauses, breaths, and sub-word gaps. A
+/// longer pause (e.g. 1 s of silence) will still terminate the run.
+///
+/// Without this tolerance, a single VAD-negative chunk in the middle
+/// of a word would reset the run accumulator and we would lose all
+/// preceding audio. Real LibriSpeech speech gives ~80-90% chunks above
+/// the VAD threshold, but the 10-20% negative chunks are sprinkled
+/// throughout, not clustered at the end of sentences. Natural running
+/// speech needs this smoothing to produce even a handful of 3 s
+/// continuous runs.
+pub const MAX_SILENT_CHUNKS_IN_RUN: usize = 16;
+
 pub struct EnrollmentSession {
     vad: SileroVad,
     ecapa: EcapaTdnn,
@@ -143,14 +157,25 @@ impl EnrollmentSession {
 }
 
 /// Walk `audio` in 512-sample chunks, run VAD over each, and return the
-/// list of 3-second contiguous-speech segments. Shorter runs are discarded.
+/// list of 3-second contiguous-speech segments. Runs of speech separated
+/// by <= MAX_SILENT_CHUNKS_IN_RUN silent chunks are treated as one run
+/// so that natural intra-word pauses do not fragment the accumulator.
 ///
 /// This is factored out so it can be unit-tested with synthetic inputs
 /// and a mocked VAD (the real VAD needs a real ONNX session, which only
 /// works at the integration-test level).
 fn segment_by_vad(vad: &mut SileroVad, audio: &[f32]) -> anyhow::Result<Vec<Vec<f32>>> {
     let mut segments: Vec<Vec<f32>> = Vec::new();
+    // Current run buffer. Extended on speech chunks AND on "pending"
+    // silence chunks that are immediately followed by another speech
+    // chunk. If we flush without seeing more speech, the pending
+    // silence is discarded along with the run.
     let mut current_run: Vec<f32> = Vec::with_capacity(SEGMENT_SAMPLES_16K);
+    // Buffer of silent chunks we are considering as "inside the run".
+    // On speech we flush this into current_run; on too-long silence we
+    // drop both this and the current run.
+    let mut pending_silence: Vec<f32> = Vec::new();
+    let mut silent_chunks_in_row: usize = 0;
 
     let num_chunks = audio.len() / VAD_CHUNK_SAMPLES;
     for i in 0..num_chunks {
@@ -160,12 +185,19 @@ fn segment_by_vad(vad: &mut SileroVad, audio: &[f32]) -> anyhow::Result<Vec<Vec<
             .is_speech(chunk)
             .map_err(|e| anyhow::anyhow!("vad.is_speech: {e}"))?;
         if speech {
+            // Flush any pending silence into the run first, then the new
+            // chunk. This preserves temporal continuity across short
+            // intra-word gaps.
+            if !pending_silence.is_empty() {
+                current_run.append(&mut pending_silence);
+            }
+            silent_chunks_in_row = 0;
             current_run.extend_from_slice(chunk);
-            // If the current run has reached one full segment's worth,
-            // emit it and start over. We DON'T try to pack multiple
-            // segments into a single run -- each segment should come
-            // from a distinct speech run for maximum diversity of
-            // phonetic content.
+
+            // Emit a segment once the run reaches a full SEGMENT length.
+            // Each segment should come from a distinct speech run for
+            // diversity of phonetic content, so we clear the accumulator
+            // instead of slicing into multiple segments per run.
             if current_run.len() >= SEGMENT_SAMPLES_16K {
                 let mut segment = Vec::with_capacity(SEGMENT_SAMPLES_16K);
                 segment.extend_from_slice(&current_run[..SEGMENT_SAMPLES_16K]);
@@ -176,11 +208,18 @@ fn segment_by_vad(vad: &mut SileroVad, audio: &[f32]) -> anyhow::Result<Vec<Vec<
                 }
             }
         } else {
-            // Silence -- drop the current partial run. This is the
-            // natural speech-pause behavior: pauses reset the segment
-            // accumulator, which means short runs never accidentally
-            // concatenate into a "segment" split across a long gap.
-            current_run.clear();
+            silent_chunks_in_row += 1;
+            if silent_chunks_in_row <= MAX_SILENT_CHUNKS_IN_RUN {
+                // Tolerated intra-run silence -- buffer it.
+                pending_silence.extend_from_slice(chunk);
+            } else {
+                // Real sentence boundary. Drop everything -- both the
+                // current run and the pending silence. A new run starts
+                // on the next speech chunk with zero history.
+                current_run.clear();
+                pending_silence.clear();
+                silent_chunks_in_row = 0;
+            }
         }
     }
 
