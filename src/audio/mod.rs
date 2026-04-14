@@ -1,3 +1,4 @@
+pub mod audio_server;
 pub mod capture;
 pub mod output;
 pub mod resampler;
