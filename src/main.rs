@@ -19,6 +19,7 @@ use voicegate::enrollment::enroll::EnrollmentSession;
 use voicegate::enrollment::profile::Profile;
 use voicegate::ml::embedding::EcapaTdnn;
 use voicegate::ml::vad::SileroVad;
+use voicegate::pipeline::processor::{PipelineProcessor, PipelineStatus};
 
 #[derive(Parser)]
 #[command(
@@ -36,11 +37,23 @@ enum Commands {
     /// List cpal input and output devices.
     Devices,
 
-    /// Run the audio pipeline. In Phase 1, only --passthrough is wired.
+    /// Run the audio pipeline.
     Run {
         /// Passthrough mode: mic -> virtual mic with no ML processing.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "headless")]
         passthrough: bool,
+
+        /// Headless gated pipeline using a saved profile.
+        #[arg(long)]
+        headless: bool,
+
+        /// Path to profile.bin. Defaults to Profile::default_path().
+        #[arg(long, value_name = "PATH")]
+        profile: Option<PathBuf>,
+
+        /// Override input device.
+        #[arg(long, value_name = "NAME")]
+        input_device: Option<String>,
     },
 
     /// Enroll a voice. Exactly one of --wav, --mic, or --list-passages must be provided.
@@ -82,7 +95,20 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::Devices => cmd_devices(),
-        Commands::Run { passthrough } => cmd_run(passthrough),
+        Commands::Run {
+            passthrough,
+            headless,
+            profile,
+            input_device,
+        } => {
+            if passthrough {
+                cmd_run_passthrough()
+            } else if headless {
+                cmd_run_headless(profile, input_device)
+            } else {
+                anyhow::bail!("specify --passthrough or --headless. GUI mode lands in Phase 5.")
+            }
+        }
         Commands::Enroll {
             wav,
             mic,
@@ -110,11 +136,7 @@ fn cmd_devices() -> Result<()> {
 }
 
 /// `voicegate run --passthrough` -- mic to virtual-mic loopback with no ML.
-fn cmd_run(passthrough: bool) -> Result<()> {
-    if !passthrough {
-        anyhow::bail!("Phase 1 only implements `run --passthrough`. Gated mode lands in Phase 4.");
-    }
-
+fn cmd_run_passthrough() -> Result<()> {
     let config = Config::load()?;
     tracing::info!(
         input_device = %config.audio.input_device,
@@ -205,6 +227,116 @@ fn cmd_run(passthrough: bool) -> Result<()> {
     // 9. Drop the streams (stops callbacks), THEN tear down the virtual mic.
     //    Order matters: if we tore down first, the output callback would
     //    still be writing to a device that no longer exists.
+    drop(capture);
+    drop(output);
+
+    if let Err(e) = vmic.teardown() {
+        tracing::warn!(%e, "virtual mic teardown failed");
+    }
+
+    tracing::info!("shutdown complete");
+    Ok(())
+}
+
+/// `voicegate run --headless` -- gated pipeline with speaker verification.
+fn cmd_run_headless(
+    profile_path: Option<PathBuf>,
+    input_device_override: Option<String>,
+) -> Result<()> {
+    let config = Config::load()?;
+
+    let profile_file = match profile_path {
+        Some(p) => p,
+        None => {
+            if config.enrollment.profile_path != "auto" {
+                PathBuf::from(&config.enrollment.profile_path)
+            } else {
+                Profile::default_path()?
+            }
+        }
+    };
+    tracing::info!(profile = %profile_file.display(), "loading profile");
+    let profile = Profile::load(&profile_file)?;
+
+    let silero_path = resolve_model_path(&config.vad.model_path)?;
+    let wespeaker_path = resolve_model_path(&config.verification.model_path)?;
+    let vad = SileroVad::load(&silero_path)?;
+    let ecapa = EcapaTdnn::load(&wespeaker_path)?;
+
+    let status = Arc::new(PipelineStatus::default());
+    let mut pipeline = PipelineProcessor::new(&config, profile, vad, ecapa, status.clone())?;
+
+    let mut vmic = create_virtual_mic();
+    let output_device_name = vmic
+        .setup()
+        .map_err(|e| anyhow::anyhow!("virtual mic setup: {e}"))?;
+    tracing::info!(
+        output_device = %output_device_name,
+        discord_device = %vmic.discord_device_name(),
+        "virtual mic ready"
+    );
+
+    let (input_prod, mut input_cons) = new_audio_ring(RING_CAPACITY_SAMPLES);
+    let (mut output_prod, output_cons) = new_audio_ring(RING_CAPACITY_SAMPLES);
+
+    let input_dev = input_device_override
+        .as_deref()
+        .unwrap_or(&config.audio.input_device);
+    let capture = start_capture(Some(input_dev), input_prod)?;
+    tracing::info!(device = %capture.device_name, "capture started");
+
+    let output = start_output(&output_device_name, output_cons)?;
+    tracing::info!(device = %output.device_name, "output started");
+
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_signal = shutdown.clone();
+    ctrlc::set_handler(move || {
+        tracing::info!("Ctrl-C received, shutting down");
+        shutdown_signal.store(true, Ordering::SeqCst);
+    })
+    .map_err(|e| anyhow::anyhow!("install ctrl-c handler: {e}"))?;
+
+    let worker_shutdown = shutdown.clone();
+    let frame_samples = config.audio.frame_size_samples();
+    let worker = thread::spawn(move || {
+        let mut frame = vec![0.0f32; frame_samples];
+        while !worker_shutdown.load(Ordering::Relaxed) {
+            let mut got = 0;
+            while got < frame_samples {
+                if worker_shutdown.load(Ordering::Relaxed) {
+                    return;
+                }
+                let n = input_cons.pop_slice(&mut frame[got..]);
+                got += n;
+                if n == 0 {
+                    thread::sleep(Duration::from_micros(500));
+                }
+            }
+
+            if let Err(e) = pipeline.process_frame(&mut frame) {
+                tracing::error!("pipeline error: {e}");
+                frame.fill(0.0);
+            }
+
+            output_prod.push_slice(&frame);
+        }
+        tracing::info!("pipeline worker exiting");
+    });
+
+    println!(
+        "VoiceGate headless pipeline is live. Point Discord at {:?} and speak into the mic.",
+        vmic.discord_device_name()
+    );
+    println!("Press Ctrl-C to stop.");
+
+    while !shutdown.load(Ordering::SeqCst) {
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    if let Err(e) = worker.join() {
+        tracing::warn!(?e, "worker thread panicked");
+    }
+
     drop(capture);
     drop(output);
 
