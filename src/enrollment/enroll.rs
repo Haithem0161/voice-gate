@@ -38,25 +38,20 @@ pub const MIN_ENROLL_DURATION_SAMPLES_16K: usize = 16_000 * 20;
 pub const SEGMENT_SAMPLES_16K: usize = 16_000 * 3;
 
 /// Minimum number of 3-second speech segments required to finalize.
-pub const MIN_SEGMENTS: usize = 5;
+/// Lowered from 5 to 3 to accommodate Bluetooth mics with lower
+/// signal levels and natural pauses in conversational speech.
+pub const MIN_SEGMENTS: usize = 3;
 
 /// Maximum number of segments to keep. Extra segments beyond this are
 /// dropped to bound the amount of ONNX inference `finalize` does.
 pub const MAX_SEGMENTS: usize = 12;
 
 /// How many consecutive silent 32 ms chunks are tolerated inside a
-/// speech run before the run is flushed. 16 chunks = 512 ms, which
-/// covers normal between-word pauses, breaths, and sub-word gaps. A
-/// longer pause (e.g. 1 s of silence) will still terminate the run.
-///
-/// Without this tolerance, a single VAD-negative chunk in the middle
-/// of a word would reset the run accumulator and we would lose all
-/// preceding audio. Real LibriSpeech speech gives ~80-90% chunks above
-/// the VAD threshold, but the 10-20% negative chunks are sprinkled
-/// throughout, not clustered at the end of sentences. Natural running
-/// speech needs this smoothing to produce even a handful of 3 s
-/// continuous runs.
-pub const MAX_SILENT_CHUNKS_IN_RUN: usize = 16;
+/// speech run before the run is flushed. 32 chunks = 1024 ms, which
+/// covers normal between-word pauses, breaths, sub-word gaps, and
+/// Bluetooth codec latency artifacts. Increased from 16 (512ms) to
+/// handle quieter Bluetooth mic signals where VAD flickers more.
+pub const MAX_SILENT_CHUNKS_IN_RUN: usize = 32;
 
 pub struct EnrollmentSession {
     vad: SileroVad,
