@@ -17,29 +17,46 @@ use std::path::{Path, PathBuf};
 /// Resolve a model file name (e.g. `silero_vad.onnx`) via the lookup order:
 /// env var VOICEGATE_MODELS_DIR -> executable-relative -> repo-relative.
 pub fn resolve_model_path(name: &str) -> anyhow::Result<PathBuf> {
+    // If name is a full path that exists, use it directly
+    let as_path = Path::new(name);
+    if as_path.is_absolute() && as_path.exists() {
+        return Ok(as_path.to_path_buf());
+    }
+    // Extract just the filename for directory-based lookups
+    // (handles config values like "models/silero_vad.onnx")
+    let filename = Path::new(name)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or(name);
+
     if let Ok(dir) = std::env::var("VOICEGATE_MODELS_DIR") {
-        let candidate = PathBuf::from(dir).join(name);
+        let candidate = PathBuf::from(dir).join(filename);
         if candidate.exists() {
             return Ok(candidate);
         }
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let candidate = dir.join("models").join(name);
+            let candidate = dir.join("models").join(filename);
             if candidate.exists() {
                 return Ok(candidate);
             }
         }
     }
     // System-wide install path (deb package)
-    let candidate = Path::new("/usr/share/voicegate/models").join(name);
+    let candidate = Path::new("/usr/share/voicegate/models").join(filename);
     if candidate.exists() {
         return Ok(candidate);
     }
     // Repo-relative (dev builds)
     let candidate = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("models")
-        .join(name);
+        .join(filename);
+    if candidate.exists() {
+        return Ok(candidate);
+    }
+    // Try the raw name as a relative path (e.g. "models/silero_vad.onnx")
+    let candidate = Path::new(env!("CARGO_MANIFEST_DIR")).join(name);
     if candidate.exists() {
         return Ok(candidate);
     }
@@ -51,8 +68,13 @@ pub fn resolve_model_path(name: &str) -> anyhow::Result<PathBuf> {
 /// Resolve an asset file name (e.g. `enrollment_passages.txt`) via the
 /// lookup order: env var VOICEGATE_ASSETS_DIR -> executable-relative -> repo-relative.
 pub fn resolve_asset_path(name: &str) -> anyhow::Result<PathBuf> {
+    let filename = Path::new(name)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or(name);
+
     if let Ok(dir) = std::env::var("VOICEGATE_ASSETS_DIR") {
-        let candidate = PathBuf::from(dir).join(name);
+        let candidate = PathBuf::from(dir).join(filename);
         if candidate.exists() {
             return Ok(candidate);
         }
