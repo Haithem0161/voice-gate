@@ -491,11 +491,21 @@ fn cmd_enroll_mic(seconds: u32, output: Option<PathBuf>, device: Option<String>)
     let (input_prod, mut input_cons) = new_audio_ring(RING_CAPACITY_SAMPLES);
     let device_ref = device.as_deref();
     let capture = start_capture(device_ref, input_prod)?;
-    tracing::info!(device = %capture.device_name, "enroll mic capture started");
+    let capture_rate = capture.sample_rate;
+    tracing::info!(device = %capture.device_name, rate = capture_rate, "enroll mic capture started");
 
-    // Resampler: cpal captures at 48 kHz, enrollment needs 16 kHz.
-    let mut resampler = Resampler48to16::new()?;
-    let mut scratch = vec![0.0f32; INPUT_CHUNK_SAMPLES];
+    let mut resampler_48to16 = if capture_rate == 48_000 {
+        Some(Resampler48to16::new()?)
+    } else {
+        None
+    };
+    let mut pre_resampler = if capture_rate != 48_000 && capture_rate != 16_000 {
+        Some(CaptureResampler::new(capture_rate, 16_000)?)
+    } else {
+        None
+    };
+    let mut scratch = vec![0.0f32; 4096];
+    let mut resample_buf: Vec<f32> = Vec::with_capacity(4096);
 
     let start = std::time::Instant::now();
     let target_duration = Duration::from_secs(u64::from(seconds));
@@ -509,12 +519,22 @@ fn cmd_enroll_mic(seconds: u32, output: Option<PathBuf>, device: Option<String>)
             thread::sleep(Duration::from_micros(500));
             continue;
         }
-        if n == INPUT_CHUNK_SAMPLES {
-            // Full frame -- resample to 16 kHz and push to enrollment.
-            let out = resampler.process_block(&scratch)?;
-            session.push_audio(out);
+
+        if capture_rate == 16_000 {
+            session.push_audio(&scratch[..n]);
+        } else if let Some(ref mut r48) = resampler_48to16 {
+            if n == INPUT_CHUNK_SAMPLES {
+                let out = r48.process_block(&scratch[..n])?;
+                session.push_audio(out);
+            }
+        } else if let Some(ref mut pre) = pre_resampler {
+            resample_buf.clear();
+            pre.process(&scratch[..n], &mut resample_buf)?;
+            if !resample_buf.is_empty() {
+                session.push_audio(&resample_buf);
+            }
         }
-        // Progress dot every 1 s.
+
         if last_progress_tick.elapsed() >= Duration::from_secs(1) {
             print!(".");
             std::io::Write::flush(&mut std::io::stdout()).ok();

@@ -77,9 +77,25 @@ impl EnrollmentWizardState {
             );
             let capture =
                 crate::audio::capture::start_capture(Some(&config.audio.input_device), input_prod)?;
+            let capture_rate = capture.sample_rate;
 
-            let mut resampler = crate::audio::resampler::Resampler48to16::new()?;
-            let mut scratch = vec![0.0f32; crate::audio::resampler::INPUT_CHUNK_SAMPLES];
+            // Build the right resampling chain based on capture rate.
+            // Enrollment needs 16 kHz audio. Capture may be 16k, 44.1k, 48k, etc.
+            let mut resampler_48to16 = if capture_rate == 48_000 {
+                Some(crate::audio::resampler::Resampler48to16::new()?)
+            } else {
+                None
+            };
+            let mut pre_resampler = if capture_rate != 48_000 && capture_rate != 16_000 {
+                Some(crate::audio::resampler::CaptureResampler::new(
+                    capture_rate,
+                    16_000,
+                )?)
+            } else {
+                None
+            };
+            let mut scratch = vec![0.0f32; 4096];
+            let mut resample_buf: Vec<f32> = Vec::with_capacity(4096);
 
             let start = std::time::Instant::now();
             let target = std::time::Duration::from_secs(u64::from(seconds));
@@ -90,10 +106,25 @@ impl EnrollmentWizardState {
                     thread::sleep(std::time::Duration::from_micros(500));
                     continue;
                 }
-                if n == crate::audio::resampler::INPUT_CHUNK_SAMPLES {
-                    let out = resampler.process_block(&scratch)?;
-                    session.push_audio(out);
+
+                if capture_rate == 16_000 {
+                    // Already 16 kHz -- push directly
+                    session.push_audio(&scratch[..n]);
+                } else if let Some(ref mut r48) = resampler_48to16 {
+                    // 48 kHz -> 16 kHz via the fixed resampler
+                    if n == crate::audio::resampler::INPUT_CHUNK_SAMPLES {
+                        let out = r48.process_block(&scratch[..n])?;
+                        session.push_audio(out);
+                    }
+                } else if let Some(ref mut pre) = pre_resampler {
+                    // Other rate -> 16 kHz via CaptureResampler
+                    resample_buf.clear();
+                    pre.process(&scratch[..n], &mut resample_buf)?;
+                    if !resample_buf.is_empty() {
+                        session.push_audio(&resample_buf);
+                    }
                 }
+
                 progress.store(start.elapsed().as_secs() as u32, Ordering::Relaxed);
             }
 

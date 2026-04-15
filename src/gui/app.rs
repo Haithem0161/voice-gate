@@ -567,9 +567,10 @@ impl eframe::App for VoiceGateApp {
                 }
             });
 
-        if self.controller.is_running() {
-            ctx.request_repaint_after(std::time::Duration::from_millis(50));
-        }
+        // Always request repaint at 20Hz to keep the UI responsive.
+        // Without this, egui on some Linux/Wayland setups only repaints
+        // on input events (mouse move, key press).
+        ctx.request_repaint_after(std::time::Duration::from_millis(50));
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
