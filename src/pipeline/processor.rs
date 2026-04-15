@@ -40,6 +40,7 @@ pub struct PipelineProcessor {
     status: Arc<PipelineStatus>,
     vad_threshold: f32,
     verify_threshold: f32,
+    frame_count: u64,
 }
 
 impl PipelineProcessor {
@@ -72,11 +73,23 @@ impl PipelineProcessor {
             status,
             vad_threshold: config.vad.threshold,
             verify_threshold: config.verification.threshold,
+            frame_count: 0,
         })
     }
 
     pub fn process_frame(&mut self, frame: &mut [f32]) -> anyhow::Result<()> {
         debug_assert_eq!(frame.len(), INPUT_CHUNK_SAMPLES);
+
+        // Log input RMS every ~1 second (31 frames)
+        self.frame_count += 1;
+        if self.frame_count % 31 == 0 {
+            let rms: f32 = (frame.iter().map(|s| s * s).sum::<f32>() / frame.len() as f32).sqrt();
+            tracing::info!(
+                frame = self.frame_count,
+                input_rms = format!("{:.5}", rms),
+                "input frame"
+            );
+        }
 
         let resampled = self.resampler.process_block(frame)?;
         self.resample_accum.extend_from_slice(resampled);
@@ -88,6 +101,15 @@ impl PipelineProcessor {
             self.status
                 .vad_active
                 .store(speech as u8, Ordering::Relaxed);
+
+            if self.frame_count % 31 == 0 {
+                tracing::info!(
+                    vad_prob = format!("{:.3}", prob),
+                    speech,
+                    threshold = format!("{:.2}", self.vad_threshold),
+                    "VAD"
+                );
+            }
 
             if speech {
                 self.window.push(&chunk);
@@ -103,6 +125,13 @@ impl PipelineProcessor {
                     self.status
                         .similarity
                         .store(self.verifier.current_score().to_bits(), Ordering::Relaxed);
+
+                    tracing::info!(
+                        score = format!("{:.4}", self.verifier.current_score()),
+                        threshold = format!("{:.2}", self.verify_threshold),
+                        is_match = self.verifier.current_score() >= self.verify_threshold,
+                        "verify"
+                    );
                 }
             }
         }
@@ -114,7 +143,31 @@ impl PipelineProcessor {
             _ => self.verifier.current_score() >= self.verify_threshold,
         };
 
+        if self.frame_count % 31 == 0 {
+            let out_rms: f32 =
+                (frame.iter().map(|s| s * s).sum::<f32>() / frame.len() as f32).sqrt();
+            tracing::info!(
+                gate = ?self.gate.state(),
+                is_match,
+                score = format!("{:.4}", self.verifier.current_score()),
+                "gate decision (pre-process)"
+            );
+            // Log output RMS after gate processing below
+            let _ = out_rms; // used after gate.process
+        }
+
         self.gate.process(frame, is_match);
+
+        if self.frame_count % 31 == 0 {
+            let out_rms: f32 =
+                (frame.iter().map(|s| s * s).sum::<f32>() / frame.len() as f32).sqrt();
+            tracing::info!(
+                output_rms = format!("{:.5}", out_rms),
+                gate = ?self.gate.state(),
+                "output frame"
+            );
+        }
+
         self.status
             .gate_state
             .store(self.gate.state().as_u8(), Ordering::Relaxed);

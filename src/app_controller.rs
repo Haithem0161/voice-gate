@@ -79,17 +79,18 @@ impl AppController {
         let mut pipeline =
             PipelineProcessor::new(&config, profile, vad, ecapa, self.status.clone())?;
 
+        let (input_prod, mut input_cons) = new_audio_ring(RING_CAPACITY_SAMPLES);
+        let (mut output_prod, output_cons) = new_audio_ring(RING_CAPACITY_SAMPLES);
+
+        // Capture BEFORE virtual mic setup so PipeWire links to the real mic.
+        let input_dev = config.audio.input_device.clone();
+        let capture = start_capture(Some(&input_dev), input_prod)?;
+        let capture_rate = capture.sample_rate;
+
         let mut vmic = create_virtual_mic();
         let output_device_name = vmic
             .setup()
             .map_err(|e| anyhow::anyhow!("virtual mic setup: {e}"))?;
-
-        let (input_prod, mut input_cons) = new_audio_ring(RING_CAPACITY_SAMPLES);
-        let (mut output_prod, output_cons) = new_audio_ring(RING_CAPACITY_SAMPLES);
-
-        let input_dev = config.audio.input_device.clone();
-        let capture = start_capture(Some(&input_dev), input_prod)?;
-        let capture_rate = capture.sample_rate;
         let output = start_output(&output_device_name, output_cons)?;
 
         let shutdown = Arc::new(AtomicBool::new(false));

@@ -38,10 +38,10 @@ pub fn start_capture(
     device_name: Option<&str>,
     producer: AudioProducer,
 ) -> anyhow::Result<CaptureStream> {
-    // On Linux with PipeWire, prefer the "pipewire" ALSA device over
-    // "default". The ALSA "default" device often connects to hardware
-    // directly, bypassing PipeWire routing -- making Bluetooth mics
-    // and other PipeWire-managed sources invisible.
+    // On Linux with PipeWire, use the "pipewire" ALSA device AND set
+    // PIPEWIRE_NODE to the default audio source. Without PIPEWIRE_NODE,
+    // the pipewire ALSA plugin routes to the hardware card, not the
+    // PipeWire default source (which may be a Bluetooth mic).
     let effective_name = device_name;
     #[cfg(target_os = "linux")]
     let _pipewire_override;
@@ -52,7 +52,27 @@ pub fn start_capture(
         if (requested == "default" || requested == "pipewire")
             && detect_audio_server() == AudioServer::PipeWire
         {
-            tracing::info!("PipeWire detected, using 'pipewire' ALSA device for capture");
+            // Find the default source node name and set PIPEWIRE_NODE
+            if let Ok(output) = std::process::Command::new("wpctl")
+                .args(["inspect", "@DEFAULT_AUDIO_SOURCE@"])
+                .output()
+            {
+                let text = String::from_utf8_lossy(&output.stdout);
+                for line in text.lines() {
+                    let trimmed = line.trim();
+                    if let Some(rest) = trimmed.strip_prefix("node.name") {
+                        if let Some(name) = rest.split('=').nth(1) {
+                            let name = name.trim().trim_matches('"').trim();
+                            tracing::info!(
+                                pipewire_node = %name,
+                                "routing capture to PipeWire default source"
+                            );
+                            std::env::set_var("PIPEWIRE_NODE", name);
+                        }
+                        break;
+                    }
+                }
+            }
             _pipewire_override = "pipewire".to_string();
             Some(_pipewire_override.as_str())
         } else {
@@ -119,6 +139,11 @@ pub fn start_capture(
     stream
         .play()
         .map_err(|e| anyhow::anyhow!("input stream play: {e}"))?;
+
+    // Clear PIPEWIRE_NODE after capture is established so it doesn't
+    // interfere with the output stream opening later.
+    #[cfg(target_os = "linux")]
+    std::env::remove_var("PIPEWIRE_NODE");
 
     Ok(CaptureStream {
         _stream: stream,

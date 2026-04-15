@@ -154,7 +154,17 @@ fn cmd_run_passthrough() -> Result<()> {
         "starting passthrough"
     );
 
-    // 1. Set up the virtual mic and learn which cpal output device to write to.
+    // 1. Start capture BEFORE virtual mic so PipeWire links it to the
+    //    real microphone, not the virtual source we're about to create.
+    let (input_prod, mut input_cons) = new_audio_ring(RING_CAPACITY_SAMPLES);
+    let (mut output_prod, output_cons) = new_audio_ring(RING_CAPACITY_SAMPLES);
+
+    let input_requested = config.audio.input_device.as_str();
+    let capture = start_capture(Some(input_requested), input_prod)?;
+    let capture_rate = capture.sample_rate;
+    tracing::info!(device = %capture.device_name, rate = capture_rate, "capture started");
+
+    // 2. Now create the virtual mic nodes.
     let mut vmic = create_virtual_mic();
     let output_device_name = vmic
         .setup()
@@ -165,17 +175,7 @@ fn cmd_run_passthrough() -> Result<()> {
         "virtual mic ready"
     );
 
-    // 2. Allocate input and output ring buffers. 3 seconds of headroom each.
-    let (input_prod, mut input_cons) = new_audio_ring(RING_CAPACITY_SAMPLES);
-    let (mut output_prod, output_cons) = new_audio_ring(RING_CAPACITY_SAMPLES);
-
-    // 3. Start the capture stream (pushes into input ring).
-    let input_requested = config.audio.input_device.as_str();
-    let capture = start_capture(Some(input_requested), input_prod)?;
-    let capture_rate = capture.sample_rate;
-    tracing::info!(device = %capture.device_name, rate = capture_rate, "capture started");
-
-    // 4. Start the output stream.
+    // 3. Start the output stream.
     let output = start_output(&output_device_name, output_cons)?;
     tracing::info!(device = %output.device_name, "output started");
 
@@ -281,16 +281,10 @@ fn cmd_run_headless(
     let status = Arc::new(PipelineStatus::default());
     let mut pipeline = PipelineProcessor::new(&config, profile, vad, ecapa, status.clone())?;
 
-    let mut vmic = create_virtual_mic();
-    let output_device_name = vmic
-        .setup()
-        .map_err(|e| anyhow::anyhow!("virtual mic setup: {e}"))?;
-    tracing::info!(
-        output_device = %output_device_name,
-        discord_device = %vmic.discord_device_name(),
-        "virtual mic ready"
-    );
-
+    // Start capture BEFORE creating the virtual mic nodes. PipeWire
+    // auto-links new streams to available sources/sinks. If we create
+    // voicegate_sink/mic first, PipeWire may link the capture to the
+    // virtual mic instead of the real microphone.
     let (input_prod, mut input_cons) = new_audio_ring(RING_CAPACITY_SAMPLES);
     let (mut output_prod, output_cons) = new_audio_ring(RING_CAPACITY_SAMPLES);
 
@@ -300,6 +294,16 @@ fn cmd_run_headless(
     let capture = start_capture(Some(input_dev), input_prod)?;
     let capture_rate = capture.sample_rate;
     tracing::info!(device = %capture.device_name, rate = capture_rate, "capture started");
+
+    let mut vmic = create_virtual_mic();
+    let output_device_name = vmic
+        .setup()
+        .map_err(|e| anyhow::anyhow!("virtual mic setup: {e}"))?;
+    tracing::info!(
+        output_device = %output_device_name,
+        discord_device = %vmic.discord_device_name(),
+        "virtual mic ready"
+    );
 
     let output = start_output(&output_device_name, output_cons)?;
     tracing::info!(device = %output.device_name, "output started");

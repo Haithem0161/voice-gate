@@ -104,9 +104,9 @@ pub fn start_output(device_name: &str, consumer: AudioConsumer) -> anyhow::Resul
         .play()
         .map_err(|e| anyhow::anyhow!("output stream play: {e}"))?;
 
-    // Clear PIPEWIRE_NODE so it doesn't affect subsequent capture streams.
-    #[cfg(target_os = "linux")]
-    std::env::remove_var("PIPEWIRE_NODE");
+    // PIPEWIRE_NODE stays set -- capture is opened before vmic setup
+    // so it can't be affected. Removing it here could break the output
+    // stream's connection to the sink.
 
     Ok(OutputStream {
         _stream: stream,

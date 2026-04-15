@@ -82,7 +82,11 @@ impl Default for AudioConfig {
 impl Default for VadConfig {
     fn default() -> Self {
         Self {
-            threshold: 0.5,
+            // 0.15 is more forgiving than Silero's recommended 0.5.
+            // Bluetooth mics and quiet environments produce low VAD
+            // probabilities even during clear speech. A lower threshold
+            // ensures the pipeline detects speech on all mic types.
+            threshold: 0.15,
             model_path: "models/silero_vad.onnx".into(),
         }
     }
@@ -91,7 +95,11 @@ impl Default for VadConfig {
 impl Default for VerificationConfig {
     fn default() -> Self {
         Self {
-            threshold: 0.70,
+            // 0.45 is calibrated for real-world Bluetooth mics where
+            // cosine similarity plateaus around 0.5-0.6 due to codec
+            // artifacts and lower signal quality. The PRD's 0.70 was
+            // based on clean 48kHz wired mic recordings.
+            threshold: 0.45,
             ema_alpha: 0.3,
             model_path: "models/wespeaker_resnet34_lm.onnx".into(),
         }
