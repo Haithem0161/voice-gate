@@ -77,6 +77,10 @@ release:
 package-linux: release
 	bash scripts/package-appimage.sh
 
+# Package as .deb (Debian/Ubuntu).
+package-deb: release
+	bash scripts/package-deb.sh
+
 # Package as MSI (Windows). Requires cargo-wix.
 package-windows: release
 	cargo wix
