@@ -68,6 +68,13 @@ mod linux {
                 ));
             }
 
+            // Kill any stale pw-loopback processes from crashed runs.
+            // Duplicate nodes confuse PipeWire's routing.
+            let _ = Command::new("pkill")
+                .args(["-f", "pw-loopback.*voicegate"])
+                .output();
+            thread::sleep(Duration::from_millis(200));
+
             if which::which("pw-loopback").is_err() {
                 return Err(VoiceGateError::VirtualMic(
                     "pw-loopback not found on PATH. VoiceGate requires PipeWire on Linux. \
