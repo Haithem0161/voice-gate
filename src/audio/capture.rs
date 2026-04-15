@@ -38,40 +38,30 @@ pub fn start_capture(
     device_name: Option<&str>,
     producer: AudioProducer,
 ) -> anyhow::Result<CaptureStream> {
-    // On Linux, if PipeWire is running, set PIPEWIRE_NODE to route through
-    // the PipeWire default source. cpal's ALSA "default" device connects to
-    // the hardware card directly, bypassing PipeWire -- so Bluetooth and
-    // other PipeWire-managed sources are invisible without this.
+    // On Linux with PipeWire, prefer the "pipewire" ALSA device over
+    // "default". The ALSA "default" device often connects to hardware
+    // directly, bypassing PipeWire routing -- making Bluetooth mics
+    // and other PipeWire-managed sources invisible.
+    let effective_name = device_name;
     #[cfg(target_os = "linux")]
-    {
+    let _pipewire_override;
+    #[cfg(target_os = "linux")]
+    let effective_name = {
         use crate::audio::audio_server::{detect_audio_server, AudioServer};
-        if detect_audio_server() == AudioServer::PipeWire {
-            // Only set if not already set (env var override takes priority)
-            if std::env::var("PIPEWIRE_NODE").is_err() {
-                // Get the default source node name from wpctl
-                if let Ok(output) = std::process::Command::new("wpctl")
-                    .args(["inspect", "@DEFAULT_AUDIO_SOURCE@"])
-                    .output()
-                {
-                    let text = String::from_utf8_lossy(&output.stdout);
-                    for line in text.lines() {
-                        let trimmed = line.trim();
-                        if trimmed.starts_with("node.name") {
-                            if let Some(name) = trimmed.split('=').nth(1) {
-                                let name = name.trim().trim_matches('"');
-                                tracing::info!(pipewire_node = %name, "routing capture via PIPEWIRE_NODE");
-                                std::env::set_var("PIPEWIRE_NODE", name);
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
+        let requested = device_name.unwrap_or("default");
+        if (requested == "default" || requested == "pipewire")
+            && detect_audio_server() == AudioServer::PipeWire
+        {
+            tracing::info!("PipeWire detected, using 'pipewire' ALSA device for capture");
+            _pipewire_override = "pipewire".to_string();
+            Some(_pipewire_override.as_str())
+        } else {
+            effective_name
         }
-    }
+    };
 
     let host = cpal::default_host();
-    let device = select_input_device(&host, device_name)?;
+    let device = select_input_device(&host, effective_name)?;
     let resolved_name = device.name().unwrap_or_else(|_| "<unknown>".to_string());
 
     let supported = device
@@ -89,8 +79,15 @@ pub fn start_capture(
         "device default config"
     );
 
-    let (use_rate, use_format, use_channels) =
+    let (use_rate, mut use_format, use_channels) =
         pick_best_config(&device, default_rate, default_format, default_channels);
+
+    // PipeWire's ALSA plugin reports F32 support but produces garbage data
+    // when capturing in F32 format. Force I16 for PipeWire-routed devices.
+    if resolved_name == "pipewire" && use_format == cpal::SampleFormat::F32 {
+        tracing::info!("forcing I16 for pipewire ALSA device (F32 capture is broken)");
+        use_format = cpal::SampleFormat::I16;
+    }
 
     let stereo = use_channels >= 2;
     tracing::info!(

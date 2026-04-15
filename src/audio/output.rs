@@ -56,6 +56,8 @@ pub fn start_output(device_name: &str, consumer: AudioConsumer) -> anyhow::Resul
                     requested = %device_name,
                     "output device not found by name, trying PIPEWIRE_NODE routing"
                 );
+                // Set PIPEWIRE_NODE temporarily -- will be removed after
+                // the stream is built so it doesn't affect capture routing.
                 std::env::set_var("PIPEWIRE_NODE", device_name);
                 let dev = find_output_device(&host, "pipewire").map_err(|_| {
                     anyhow::anyhow!(
@@ -101,6 +103,10 @@ pub fn start_output(device_name: &str, consumer: AudioConsumer) -> anyhow::Resul
     stream
         .play()
         .map_err(|e| anyhow::anyhow!("output stream play: {e}"))?;
+
+    // Clear PIPEWIRE_NODE so it doesn't affect subsequent capture streams.
+    #[cfg(target_os = "linux")]
+    std::env::remove_var("PIPEWIRE_NODE");
 
     Ok(OutputStream {
         _stream: stream,
