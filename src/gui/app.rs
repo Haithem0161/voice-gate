@@ -4,20 +4,20 @@ use crate::app_controller::AppController;
 use crate::config::Config;
 use crate::gui::enrollment_wizard::EnrollmentWizardState;
 
-// -- Portfoliolio color palette --
-const BG: egui::Color32 = egui::Color32::from_rgb(0x19, 0x10, 0x22);
-const SURFACE: egui::Color32 = egui::Color32::from_rgb(0x2a, 0x1b, 0x36);
-const SURFACE_HOVER: egui::Color32 = egui::Color32::from_rgb(0x34, 0x21, 0x43);
-const PRIMARY: egui::Color32 = egui::Color32::from_rgb(0x7f, 0x13, 0xec);
-const PRIMARY_DIM: egui::Color32 = egui::Color32::from_rgb(0x4a, 0x0d, 0x85);
-const TEXT: egui::Color32 = egui::Color32::from_rgb(0xf7, 0xf6, 0xf8);
-const TEXT_MUTED: egui::Color32 = egui::Color32::from_rgb(0x8a, 0x84, 0x94);
-const SUCCESS: egui::Color32 = egui::Color32::from_rgb(0x3D, 0xAE, 0x2B);
-const WARNING: egui::Color32 = egui::Color32::from_rgb(0xf5, 0x9e, 0x0b);
-const DANGER: egui::Color32 = egui::Color32::from_rgb(0xE0, 0x23, 0x4E);
-const LED_OFF: egui::Color32 = egui::Color32::from_rgb(0x3d, 0x2f, 0x4a);
-const BORDER: egui::Color32 = egui::Color32::from_rgba_premultiplied(255, 255, 255, 15);
-const METER_BG: egui::Color32 = egui::Color32::from_rgba_premultiplied(0x7f, 0x13, 0xec, 20);
+// -- Discord color palette --
+const BG: egui::Color32 = egui::Color32::from_rgb(0x31, 0x33, 0x38); // dark bg
+const SURFACE: egui::Color32 = egui::Color32::from_rgb(0x2b, 0x2d, 0x31); // sidebar/card
+const SURFACE_HOVER: egui::Color32 = egui::Color32::from_rgb(0x3a, 0x3c, 0x43); // hover
+const PRIMARY: egui::Color32 = egui::Color32::from_rgb(0x5a, 0x65, 0xea); // blurple
+const PRIMARY_DIM: egui::Color32 = egui::Color32::from_rgb(0x4a, 0x53, 0xc4); // blurple dark
+const TEXT: egui::Color32 = egui::Color32::from_rgb(0xdb, 0xdd, 0xe0); // text normal
+const TEXT_MUTED: egui::Color32 = egui::Color32::from_rgb(0x94, 0x96, 0x9c); // text muted
+const SUCCESS: egui::Color32 = egui::Color32::from_rgb(0x23, 0xa5, 0x59); // green
+const WARNING: egui::Color32 = egui::Color32::from_rgb(0xf0, 0xb2, 0x32); // yellow
+const DANGER: egui::Color32 = egui::Color32::from_rgb(0xed, 0x42, 0x45); // red
+const LED_OFF: egui::Color32 = egui::Color32::from_rgb(0x4e, 0x50, 0x58); // muted dot
+const BORDER: egui::Color32 = egui::Color32::from_rgba_premultiplied(0, 0, 0, 40); // subtle
+const METER_BG: egui::Color32 = egui::Color32::from_rgba_premultiplied(0x5a, 0x65, 0xea, 25);
 
 enum Screen {
     Main,

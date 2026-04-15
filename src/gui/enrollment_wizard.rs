@@ -140,12 +140,12 @@ impl EnrollmentWizardState {
     pub fn render(&mut self, ui: &mut egui::Ui, controller: &AppController) -> bool {
         let mut close = false;
 
-        let primary = egui::Color32::from_rgb(0x7f, 0x13, 0xec);
-        let text = egui::Color32::from_rgb(0xf7, 0xf6, 0xf8);
-        let text_muted = egui::Color32::from_rgb(0x8a, 0x84, 0x94);
-        let surface = egui::Color32::from_rgb(0x2a, 0x1b, 0x36);
-        let danger = egui::Color32::from_rgb(0xE0, 0x23, 0x4E);
-        let border = egui::Color32::from_rgba_premultiplied(255, 255, 255, 15);
+        let primary = egui::Color32::from_rgb(0x5a, 0x65, 0xea);
+        let text = egui::Color32::from_rgb(0xdb, 0xdd, 0xe0);
+        let text_muted = egui::Color32::from_rgb(0x94, 0x96, 0x9c);
+        let surface = egui::Color32::from_rgb(0x2b, 0x2d, 0x31);
+        let danger = egui::Color32::from_rgb(0xed, 0x42, 0x45);
+        let border = egui::Color32::from_rgba_premultiplied(0, 0, 0, 40);
 
         ui.label(
             egui::RichText::new("Voice Enrollment")
@@ -241,7 +241,7 @@ impl EnrollmentWizardState {
                     egui::RichText::new("Enrollment complete!")
                         .size(16.0)
                         .strong()
-                        .color(egui::Color32::from_rgb(0x3D, 0xAE, 0x2B)),
+                        .color(egui::Color32::from_rgb(0x23, 0xa5, 0x59)),
                 );
                 ui.add_space(8.0);
                 ui.label(
