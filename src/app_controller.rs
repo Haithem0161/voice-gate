@@ -95,9 +95,10 @@ impl AppController {
         let output = start_output(&output_device_name, output_cons)?;
 
         // Monitor output: plays gated audio through default speakers when enabled.
-        // Always create the stream; silence when monitor_enabled is false because
-        // the worker won't push samples.
-        let _monitor_output = start_output("default", monitor_cons).ok();
+        // Remove PIPEWIRE_NODE so it routes to speakers, not voicegate_sink.
+        #[cfg(target_os = "linux")]
+        std::env::remove_var("PIPEWIRE_NODE");
+        let _monitor_output = start_output("pipewire", monitor_cons).ok();
 
         let shutdown = Arc::new(AtomicBool::new(false));
         let worker_shutdown = shutdown.clone();

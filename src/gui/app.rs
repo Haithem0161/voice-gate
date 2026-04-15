@@ -594,22 +594,42 @@ impl VoiceGateApp {
 
                 ui.add_space(4.0);
 
-                // Waveform display area
-                let wave_height = 80.0;
+                // Two-track waveform: input on top, output on bottom
+                let track_height = 50.0;
+                let gap = 4.0;
+                let total_height = track_height * 2.0 + gap;
                 let (wave_rect, _) = ui.allocate_exact_size(
-                    egui::vec2(ui.available_width(), wave_height),
+                    egui::vec2(ui.available_width(), total_height),
                     egui::Sense::hover(),
                 );
 
-                // Background
-                ui.painter().rect_filled(wave_rect, 6.0, BG);
+                let in_rect = egui::Rect::from_min_size(
+                    wave_rect.left_top(),
+                    egui::vec2(wave_rect.width(), track_height),
+                );
+                let out_rect = egui::Rect::from_min_size(
+                    egui::pos2(wave_rect.left(), wave_rect.top() + track_height + gap),
+                    egui::vec2(wave_rect.width(), track_height),
+                );
 
-                // Center line
-                let center_y = wave_rect.center().y;
+                // Backgrounds
+                ui.painter().rect_filled(in_rect, 6.0, BG);
+                ui.painter().rect_filled(out_rect, 6.0, BG);
+
+                // Center lines
+                let in_center = in_rect.center().y;
+                let out_center = out_rect.center().y;
                 ui.painter().line_segment(
                     [
-                        egui::pos2(wave_rect.left(), center_y),
-                        egui::pos2(wave_rect.right(), center_y),
+                        egui::pos2(in_rect.left(), in_center),
+                        egui::pos2(in_rect.right(), in_center),
+                    ],
+                    egui::Stroke::new(0.5, BORDER),
+                );
+                ui.painter().line_segment(
+                    [
+                        egui::pos2(out_rect.left(), out_center),
+                        egui::pos2(out_rect.right(), out_center),
                     ],
                     egui::Stroke::new(0.5, BORDER),
                 );
@@ -618,28 +638,28 @@ impl VoiceGateApp {
                 let wave_in = self.controller.waveform_in_snapshot();
                 let wave_out = self.controller.waveform_out_snapshot();
 
-                // Draw input waveform (blurple)
+                // Draw input waveform (blurple) in top track
                 if wave_in.len() > 1 {
-                    self.draw_wave(ui, &wave_rect, &wave_in, PRIMARY, center_y, wave_height);
+                    self.draw_wave(ui, &in_rect, &wave_in, PRIMARY, in_center, track_height);
                 }
 
-                // Draw output waveform (green)
+                // Draw output waveform (green) in bottom track
                 if wave_out.len() > 1 {
-                    self.draw_wave(ui, &wave_rect, &wave_out, SUCCESS, center_y, wave_height);
+                    self.draw_wave(ui, &out_rect, &wave_out, SUCCESS, out_center, track_height);
                 }
 
                 // Labels
                 ui.painter().text(
-                    egui::pos2(wave_rect.left() + 4.0, wave_rect.top() + 3.0),
+                    egui::pos2(in_rect.left() + 4.0, in_rect.top() + 2.0),
                     egui::Align2::LEFT_TOP,
-                    "IN",
+                    "INPUT",
                     egui::FontId::proportional(8.0),
                     PRIMARY,
                 );
                 ui.painter().text(
-                    egui::pos2(wave_rect.left() + 20.0, wave_rect.top() + 3.0),
+                    egui::pos2(out_rect.left() + 4.0, out_rect.top() + 2.0),
                     egui::Align2::LEFT_TOP,
-                    "OUT",
+                    "OUTPUT",
                     egui::FontId::proportional(8.0),
                     SUCCESS,
                 );
@@ -736,8 +756,8 @@ fn load_icon() -> Option<egui::IconData> {
 
 pub fn run() -> eframe::Result<()> {
     let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([520.0, 660.0])
-        .with_min_inner_size([440.0, 550.0]);
+        .with_inner_size([520.0, 700.0])
+        .with_min_inner_size([440.0, 600.0]);
 
     if let Some(icon) = load_icon() {
         viewport = viewport.with_icon(std::sync::Arc::new(icon));
