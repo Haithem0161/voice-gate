@@ -140,21 +140,47 @@ impl EnrollmentWizardState {
     pub fn render(&mut self, ui: &mut egui::Ui, controller: &AppController) -> bool {
         let mut close = false;
 
-        ui.heading("Voice Enrollment");
-        ui.separator();
+        let primary = egui::Color32::from_rgb(0x7f, 0x13, 0xec);
+        let text = egui::Color32::from_rgb(0xf7, 0xf6, 0xf8);
+        let text_muted = egui::Color32::from_rgb(0x8a, 0x84, 0x94);
+        let surface = egui::Color32::from_rgb(0x2a, 0x1b, 0x36);
+        let danger = egui::Color32::from_rgb(0xE0, 0x23, 0x4E);
+        let border = egui::Color32::from_rgba_premultiplied(255, 255, 255, 15);
+
+        ui.label(
+            egui::RichText::new("Voice Enrollment")
+                .size(18.0)
+                .strong()
+                .color(text),
+        );
+        ui.add_space(4.0);
 
         match &self.status {
             WizardStatus::ReadyToStart => {
-                ui.label("Please read the following text aloud:");
+                ui.label(
+                    egui::RichText::new("Please read the following text aloud:").color(text_muted),
+                );
                 ui.add_space(8.0);
-                egui::ScrollArea::vertical()
-                    .max_height(120.0)
+                egui::Frame::none()
+                    .fill(surface)
+                    .rounding(8.0)
+                    .stroke(egui::Stroke::new(1.0, border))
+                    .inner_margin(egui::Margin::same(12.0))
                     .show(ui, |ui| {
-                        ui.label(&self.passage);
+                        egui::ScrollArea::vertical()
+                            .max_height(140.0)
+                            .show(ui, |ui| {
+                                ui.label(egui::RichText::new(&self.passage).size(12.0).color(text));
+                            });
                     });
-                ui.add_space(8.0);
+                ui.add_space(12.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Start Recording").clicked() {
+                    let start = egui::Button::new(
+                        egui::RichText::new("Start Recording").strong().color(text),
+                    )
+                    .fill(primary)
+                    .rounding(8.0);
+                    if ui.add(start).clicked() {
                         self.start_recording(controller);
                     }
                     if ui.button("Cancel").clicked() {
@@ -164,21 +190,29 @@ impl EnrollmentWizardState {
             }
             WizardStatus::Recording => {
                 self.poll();
-                ui.label("Read the passage aloud:");
+                ui.label(egui::RichText::new("Read the passage aloud:").color(text_muted));
                 ui.add_space(4.0);
-                egui::ScrollArea::vertical()
-                    .max_height(80.0)
+                egui::Frame::none()
+                    .fill(surface)
+                    .rounding(8.0)
+                    .stroke(egui::Stroke::new(1.0, border))
+                    .inner_margin(egui::Margin::same(12.0))
                     .show(ui, |ui| {
-                        ui.label(&self.passage);
+                        egui::ScrollArea::vertical()
+                            .max_height(100.0)
+                            .show(ui, |ui| {
+                                ui.label(egui::RichText::new(&self.passage).size(12.0).color(text));
+                            });
                     });
-                ui.add_space(8.0);
+                ui.add_space(10.0);
                 let elapsed = self.elapsed_seconds();
                 let fraction = elapsed as f32 / self.seconds_target as f32;
                 ui.add(
                     egui::ProgressBar::new(fraction.min(1.0))
-                        .text(format!("{elapsed} s / {} s", self.seconds_target)),
+                        .text(format!("{elapsed} s / {} s", self.seconds_target))
+                        .fill(primary),
                 );
-                ui.add_space(8.0);
+                ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     if ui.button("Cancel").clicked() {
                         self.cancel();
@@ -192,21 +226,51 @@ impl EnrollmentWizardState {
             }
             WizardStatus::Processing => {
                 self.poll();
-                ui.label("Processing enrollment...");
+                ui.add_space(20.0);
+                ui.label(
+                    egui::RichText::new("Processing enrollment...")
+                        .size(14.0)
+                        .color(text),
+                );
+                ui.add_space(8.0);
                 ui.spinner();
             }
             WizardStatus::Done(path) => {
-                ui.label(format!("Enrollment saved: {}", path.display()));
+                ui.add_space(12.0);
+                ui.label(
+                    egui::RichText::new("Enrollment complete!")
+                        .size(16.0)
+                        .strong()
+                        .color(egui::Color32::from_rgb(0x3D, 0xAE, 0x2B)),
+                );
                 ui.add_space(8.0);
-                if ui.button("Close").clicked() {
+                ui.label(
+                    egui::RichText::new(format!("Saved: {}", path.display()))
+                        .size(11.0)
+                        .color(text_muted),
+                );
+                ui.add_space(12.0);
+                let btn = egui::Button::new(egui::RichText::new("Close").strong().color(text))
+                    .fill(primary)
+                    .rounding(8.0);
+                if ui.add(btn).clicked() {
                     close = true;
                 }
             }
             WizardStatus::Failed(msg) => {
-                ui.colored_label(egui::Color32::RED, format!("Enrollment failed: {msg}"));
-                ui.add_space(8.0);
+                ui.add_space(12.0);
+                ui.label(
+                    egui::RichText::new(format!("Enrollment failed: {msg}"))
+                        .size(12.0)
+                        .color(danger),
+                );
+                ui.add_space(12.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Retry").clicked() {
+                    let retry =
+                        egui::Button::new(egui::RichText::new("Retry").strong().color(text))
+                            .fill(primary)
+                            .rounding(8.0);
+                    if ui.add(retry).clicked() {
                         *self = Self::new();
                     }
                     if ui.button("Close").clicked() {
