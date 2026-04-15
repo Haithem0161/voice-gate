@@ -38,6 +38,38 @@ pub fn start_capture(
     device_name: Option<&str>,
     producer: AudioProducer,
 ) -> anyhow::Result<CaptureStream> {
+    // On Linux, if PipeWire is running, set PIPEWIRE_NODE to route through
+    // the PipeWire default source. cpal's ALSA "default" device connects to
+    // the hardware card directly, bypassing PipeWire -- so Bluetooth and
+    // other PipeWire-managed sources are invisible without this.
+    #[cfg(target_os = "linux")]
+    {
+        use crate::audio::audio_server::{detect_audio_server, AudioServer};
+        if detect_audio_server() == AudioServer::PipeWire {
+            // Only set if not already set (env var override takes priority)
+            if std::env::var("PIPEWIRE_NODE").is_err() {
+                // Get the default source node name from wpctl
+                if let Ok(output) = std::process::Command::new("wpctl")
+                    .args(["inspect", "@DEFAULT_AUDIO_SOURCE@"])
+                    .output()
+                {
+                    let text = String::from_utf8_lossy(&output.stdout);
+                    for line in text.lines() {
+                        let trimmed = line.trim();
+                        if trimmed.starts_with("node.name") {
+                            if let Some(name) = trimmed.split('=').nth(1) {
+                                let name = name.trim().trim_matches('"');
+                                tracing::info!(pipewire_node = %name, "routing capture via PIPEWIRE_NODE");
+                                std::env::set_var("PIPEWIRE_NODE", name);
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let host = cpal::default_host();
     let device = select_input_device(&host, device_name)?;
     let resolved_name = device.name().unwrap_or_else(|_| "<unknown>".to_string());
