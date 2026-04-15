@@ -243,11 +243,28 @@ impl eframe::App for VoiceGateApp {
     }
 }
 
+fn load_icon() -> Option<egui::IconData> {
+    let png_bytes = include_bytes!("../../assets/icon.png");
+    let image = image::load_from_memory(png_bytes).ok()?.into_rgba8();
+    let (width, height) = image.dimensions();
+    Some(egui::IconData {
+        rgba: image.into_raw(),
+        width,
+        height,
+    })
+}
+
 pub fn run() -> eframe::Result<()> {
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([480.0, 400.0])
+        .with_min_inner_size([400.0, 300.0]);
+
+    if let Some(icon) = load_icon() {
+        viewport = viewport.with_icon(std::sync::Arc::new(icon));
+    }
+
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([480.0, 400.0])
-            .with_min_inner_size([400.0, 300.0]),
+        viewport,
         ..Default::default()
     };
     eframe::run_native(

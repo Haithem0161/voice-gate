@@ -48,6 +48,7 @@ ctrlc = "3.5.2"
 realfft = "3.5.0"
 crc32fast = "1.5.0"
 rfd = "0.14"
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 pipewire = { version = "0.8", optional = true }

@@ -4609,6 +4609,7 @@ dependencies = [
  "eframe",
  "egui",
  "hound",
+ "image",
  "ndarray 0.15.6",
  "ort",
  "pipewire",
