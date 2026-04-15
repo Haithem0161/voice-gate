@@ -47,7 +47,7 @@ cat > "$PKG_DIR/usr/share/applications/voicegate.desktop" << 'DESKTOP'
 [Desktop Entry]
 Name=VoiceGate
 Comment=Real-time speaker isolation for Discord
-Exec=env VOICEGATE_MODELS_DIR=/usr/share/voicegate/models VOICEGATE_ASSETS_DIR=/usr/share/voicegate/assets voicegate
+Exec=voicegate run
 Icon=voicegate
 Terminal=false
 Type=Application

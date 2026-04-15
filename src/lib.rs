@@ -31,6 +31,12 @@ pub fn resolve_model_path(name: &str) -> anyhow::Result<PathBuf> {
             }
         }
     }
+    // System-wide install path (deb package)
+    let candidate = Path::new("/usr/share/voicegate/models").join(name);
+    if candidate.exists() {
+        return Ok(candidate);
+    }
+    // Repo-relative (dev builds)
     let candidate = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("models")
         .join(name);
@@ -59,6 +65,12 @@ pub fn resolve_asset_path(name: &str) -> anyhow::Result<PathBuf> {
             }
         }
     }
+    // System-wide install path (deb package)
+    let candidate = Path::new("/usr/share/voicegate/assets").join(name);
+    if candidate.exists() {
+        return Ok(candidate);
+    }
+    // Repo-relative (dev builds)
     let candidate = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("assets")
         .join(name);
