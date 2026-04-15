@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=VoiceGate
+Comment=Real-time speaker isolation for Discord
+Exec=voicegate
+Icon=voicegate
+Terminal=false
+Type=Application
+Categories=Audio;AudioVideo;

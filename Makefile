@@ -73,14 +73,13 @@ build:
 release:
 	cargo build --release
 
-# Phase 6 packaging targets (placeholders until Phase 6)
-package-linux:
-	@echo "Phase 6: AppImage / tarball packaging not yet implemented"
-	@exit 1
+# Package as AppImage (Linux). Requires appimagetool.
+package-linux: release
+	bash scripts/package-appimage.sh
 
-package-windows:
-	@echo "Phase 6: cargo-wix MSI packaging not yet implemented"
-	@exit 1
+# Package as MSI (Windows). Requires cargo-wix.
+package-windows: release
+	cargo wix
 
 clean:
 	cargo clean
