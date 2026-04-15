@@ -1,5 +1,6 @@
-use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
 
 use crate::audio::resampler::{Resampler48to16, INPUT_CHUNK_SAMPLES};
 use crate::config::Config;
@@ -10,11 +11,19 @@ use crate::ml::embedding::{EcapaTdnn, EmbeddingWindow};
 use crate::ml::similarity::SpeakerVerifier;
 use crate::ml::vad::{SileroVad, VAD_CHUNK_SAMPLES};
 
+/// Max samples to keep in each waveform buffer (~1s at 48kHz).
+const WAVEFORM_CAPACITY: usize = 48_000;
+
 pub struct PipelineStatus {
     pub similarity: AtomicU32,
     pub gate_state: AtomicU8,
     pub vad_active: AtomicU8,
     pub bypass_mode: AtomicU8,
+    pub monitor_enabled: AtomicBool,
+    /// Downsampled input waveform for GUI display. Worker pushes, GUI pops.
+    pub waveform_in: Mutex<VecDeque<f32>>,
+    /// Downsampled output (gated) waveform for GUI display.
+    pub waveform_out: Mutex<VecDeque<f32>>,
 }
 
 impl Default for PipelineStatus {
@@ -24,6 +33,9 @@ impl Default for PipelineStatus {
             gate_state: AtomicU8::new(GateState::Closed.as_u8()),
             vad_active: AtomicU8::new(0),
             bypass_mode: AtomicU8::new(0),
+            monitor_enabled: AtomicBool::new(false),
+            waveform_in: Mutex::new(VecDeque::with_capacity(WAVEFORM_CAPACITY)),
+            waveform_out: Mutex::new(VecDeque::with_capacity(WAVEFORM_CAPACITY)),
         }
     }
 }
@@ -80,7 +92,18 @@ impl PipelineProcessor {
     pub fn process_frame(&mut self, frame: &mut [f32]) -> anyhow::Result<()> {
         debug_assert_eq!(frame.len(), INPUT_CHUNK_SAMPLES);
 
-        // Log input RMS every ~1 second (31 frames)
+        // Push input waveform samples for GUI display (every 3rd sample)
+        if let Ok(mut wf) = self.status.waveform_in.try_lock() {
+            for (i, &s) in frame.iter().enumerate() {
+                if i % 3 == 0 {
+                    if wf.len() >= WAVEFORM_CAPACITY {
+                        wf.pop_front();
+                    }
+                    wf.push_back(s);
+                }
+            }
+        }
+
         self.frame_count += 1;
         if self.frame_count % 31 == 0 {
             let rms: f32 = (frame.iter().map(|s| s * s).sum::<f32>() / frame.len() as f32).sqrt();
@@ -157,6 +180,18 @@ impl PipelineProcessor {
         }
 
         self.gate.process(frame, is_match);
+
+        // Push output (gated) waveform samples for GUI display
+        if let Ok(mut wf) = self.status.waveform_out.try_lock() {
+            for (i, &s) in frame.iter().enumerate() {
+                if i % 3 == 0 {
+                    if wf.len() >= WAVEFORM_CAPACITY {
+                        wf.pop_front();
+                    }
+                    wf.push_back(s);
+                }
+            }
+        }
 
         if self.frame_count % 31 == 0 {
             let out_rms: f32 =

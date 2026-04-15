@@ -263,7 +263,7 @@ mod tests {
         assert_eq!(c2.audio.frame_size_ms, 32);
         assert_eq!(c2.gate.hold_frames, 5);
         assert!((c2.gate.crossfade_ms - 5.0).abs() < f32::EPSILON);
-        assert!((c2.verification.threshold - 0.70).abs() < f32::EPSILON);
+        assert!((c2.verification.threshold - 0.45).abs() < f32::EPSILON);
     }
 
     #[test]

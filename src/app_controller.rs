@@ -81,6 +81,7 @@ impl AppController {
 
         let (input_prod, mut input_cons) = new_audio_ring(RING_CAPACITY_SAMPLES);
         let (mut output_prod, output_cons) = new_audio_ring(RING_CAPACITY_SAMPLES);
+        let (mut monitor_prod, monitor_cons) = new_audio_ring(RING_CAPACITY_SAMPLES);
 
         // Capture BEFORE virtual mic setup so PipeWire links to the real mic.
         let input_dev = config.audio.input_device.clone();
@@ -93,10 +94,16 @@ impl AppController {
             .map_err(|e| anyhow::anyhow!("virtual mic setup: {e}"))?;
         let output = start_output(&output_device_name, output_cons)?;
 
+        // Monitor output: plays gated audio through default speakers when enabled.
+        // Always create the stream; silence when monitor_enabled is false because
+        // the worker won't push samples.
+        let _monitor_output = start_output("default", monitor_cons).ok();
+
         let shutdown = Arc::new(AtomicBool::new(false));
         let worker_shutdown = shutdown.clone();
         let frame_samples = config.audio.frame_size_samples();
         let needs_resample = capture_rate != 48_000;
+        let worker_status = self.status.clone();
 
         let worker = thread::spawn(move || {
             let mut pre_resampler = if needs_resample {
@@ -133,6 +140,9 @@ impl AppController {
                             frame.fill(0.0);
                         }
                         output_prod.push_slice(&frame);
+                        if worker_status.monitor_enabled.load(Ordering::Relaxed) {
+                            monitor_prod.push_slice(&frame);
+                        }
                     }
                 } else {
                     let mut got = 0;
@@ -243,6 +253,31 @@ impl AppController {
 
     pub fn set_bypass(&self, mode: u8) {
         self.status.bypass_mode.store(mode, Ordering::Relaxed);
+    }
+
+    pub fn set_monitor(&self, enabled: bool) {
+        self.status
+            .monitor_enabled
+            .store(enabled, Ordering::Relaxed);
+    }
+
+    /// Snapshot the input waveform buffer for GUI display. Returns a Vec
+    /// of downsampled samples (every 3rd sample from 48kHz = ~16kHz display).
+    pub fn waveform_in_snapshot(&self) -> Vec<f32> {
+        self.status
+            .waveform_in
+            .try_lock()
+            .map(|wf| wf.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// Snapshot the output (gated) waveform buffer for GUI display.
+    pub fn waveform_out_snapshot(&self) -> Vec<f32> {
+        self.status
+            .waveform_out
+            .try_lock()
+            .map(|wf| wf.iter().copied().collect())
+            .unwrap_or_default()
     }
 
     pub fn input_devices(&self) -> Vec<(String, bool)> {

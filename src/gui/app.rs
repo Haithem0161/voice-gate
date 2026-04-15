@@ -31,6 +31,7 @@ pub struct VoiceGateApp {
     threshold: f32,
     hold_frames: u32,
     bypass_mode: usize,
+    monitor_enabled: bool,
 }
 
 fn apply_theme(ctx: &egui::Context) {
@@ -89,6 +90,7 @@ impl VoiceGateApp {
             threshold,
             hold_frames,
             bypass_mode: 0,
+            monitor_enabled: false,
         }
     }
 
@@ -540,11 +542,149 @@ impl VoiceGateApp {
         ui.add_space(2.0);
         self.render_similarity_card(ui);
         ui.add_space(2.0);
+        self.render_waveform(ui);
+        ui.add_space(2.0);
         self.render_controls(ui);
         ui.add_space(2.0);
         self.render_status_strip(ui);
         ui.add_space(2.0);
         self.render_action_row(ui);
+    }
+
+    fn render_waveform(&mut self, ui: &mut egui::Ui) {
+        egui::Frame::none()
+            .fill(SURFACE)
+            .rounding(12.0)
+            .stroke(egui::Stroke::new(1.0, BORDER))
+            .inner_margin(egui::Margin::symmetric(14.0, 10.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("WAVEFORM")
+                            .size(10.0)
+                            .strong()
+                            .color(TEXT_MUTED),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Monitor toggle
+                        let prev = self.monitor_enabled;
+                        let btn_fill = if self.monitor_enabled {
+                            SUCCESS
+                        } else {
+                            LED_OFF
+                        };
+                        let btn_text = if self.monitor_enabled {
+                            "Monitor ON"
+                        } else {
+                            "Monitor OFF"
+                        };
+                        let btn =
+                            egui::Button::new(egui::RichText::new(btn_text).size(9.0).color(TEXT))
+                                .fill(btn_fill)
+                                .rounding(10.0)
+                                .min_size(egui::vec2(0.0, 18.0));
+                        if ui.add(btn).clicked() {
+                            self.monitor_enabled = !self.monitor_enabled;
+                        }
+                        if self.monitor_enabled != prev {
+                            self.controller.set_monitor(self.monitor_enabled);
+                        }
+                    });
+                });
+
+                ui.add_space(4.0);
+
+                // Waveform display area
+                let wave_height = 80.0;
+                let (wave_rect, _) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), wave_height),
+                    egui::Sense::hover(),
+                );
+
+                // Background
+                ui.painter().rect_filled(wave_rect, 6.0, BG);
+
+                // Center line
+                let center_y = wave_rect.center().y;
+                ui.painter().line_segment(
+                    [
+                        egui::pos2(wave_rect.left(), center_y),
+                        egui::pos2(wave_rect.right(), center_y),
+                    ],
+                    egui::Stroke::new(0.5, BORDER),
+                );
+
+                // Get waveform data
+                let wave_in = self.controller.waveform_in_snapshot();
+                let wave_out = self.controller.waveform_out_snapshot();
+
+                // Draw input waveform (blurple)
+                if wave_in.len() > 1 {
+                    self.draw_wave(ui, &wave_rect, &wave_in, PRIMARY, center_y, wave_height);
+                }
+
+                // Draw output waveform (green)
+                if wave_out.len() > 1 {
+                    self.draw_wave(ui, &wave_rect, &wave_out, SUCCESS, center_y, wave_height);
+                }
+
+                // Labels
+                ui.painter().text(
+                    egui::pos2(wave_rect.left() + 4.0, wave_rect.top() + 3.0),
+                    egui::Align2::LEFT_TOP,
+                    "IN",
+                    egui::FontId::proportional(8.0),
+                    PRIMARY,
+                );
+                ui.painter().text(
+                    egui::pos2(wave_rect.left() + 20.0, wave_rect.top() + 3.0),
+                    egui::Align2::LEFT_TOP,
+                    "OUT",
+                    egui::FontId::proportional(8.0),
+                    SUCCESS,
+                );
+            });
+    }
+
+    fn draw_wave(
+        &self,
+        ui: &egui::Ui,
+        rect: &egui::Rect,
+        samples: &[f32],
+        color: egui::Color32,
+        center_y: f32,
+        height: f32,
+    ) {
+        if samples.is_empty() {
+            return;
+        }
+        let width = rect.width();
+        let n = samples.len();
+        // Downsample to pixel count for performance
+        let pixels = width as usize;
+        let step = (n as f32 / pixels as f32).max(1.0);
+
+        let mut points: Vec<egui::Pos2> = Vec::with_capacity(pixels);
+        let mut i = 0.0;
+        while (i as usize) < n {
+            let idx = i as usize;
+            // Take the max absolute sample in this pixel's range for peak display
+            let end = ((i + step) as usize).min(n);
+            let peak = samples[idx..end]
+                .iter()
+                .fold(0.0f32, |acc, &s| acc.max(s.abs()));
+            let sign = if samples[idx] >= 0.0 { 1.0 } else { -1.0 };
+
+            let x = rect.left() + (idx as f32 / n as f32) * width;
+            let y = center_y - sign * peak * (height / 2.0) * 0.9; // 90% of half height
+            points.push(egui::pos2(x, y));
+            i += step;
+        }
+
+        if points.len() > 1 {
+            ui.painter()
+                .add(egui::Shape::line(points, egui::Stroke::new(1.0, color)));
+        }
     }
 }
 
@@ -596,8 +736,8 @@ fn load_icon() -> Option<egui::IconData> {
 
 pub fn run() -> eframe::Result<()> {
     let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([500.0, 520.0])
-        .with_min_inner_size([440.0, 420.0]);
+        .with_inner_size([520.0, 660.0])
+        .with_min_inner_size([440.0, 550.0]);
 
     if let Some(icon) = load_icon() {
         viewport = viewport.with_icon(std::sync::Arc::new(icon));
