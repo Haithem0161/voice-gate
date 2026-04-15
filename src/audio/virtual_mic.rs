@@ -15,13 +15,20 @@ pub fn create_virtual_mic() -> Box<dyn VirtualMic> {
     #[cfg(target_os = "linux")]
     {
         use crate::audio::audio_server::{detect_audio_server, AudioServer};
-        match detect_audio_server() {
-            AudioServer::PipeWire => Box::new(linux::PwCliVirtualMic::new()),
-            AudioServer::PulseAudio => Box::new(linux::PulseVirtualMic::new()),
-            AudioServer::Unknown => {
-                tracing::warn!("no supported audio server detected, trying PipeWire anyway");
-                Box::new(linux::PwCliVirtualMic::new())
-            }
+        // Prefer PulseAudio module approach even on PipeWire -- pw-loopback
+        // has broken monitor routing on PipeWire 1.0.x. PipeWire's PulseAudio
+        // compatibility layer handles module-null-sink + module-remap-source
+        // correctly and pactl is widely available.
+        let server = detect_audio_server();
+        if which::which("pactl").is_ok() {
+            tracing::info!(server = %server, "using PulseAudio modules for virtual mic");
+            Box::new(linux::PulseVirtualMic::new())
+        } else if server == AudioServer::PipeWire {
+            tracing::info!("pactl not found, falling back to pw-loopback");
+            Box::new(linux::PwCliVirtualMic::new())
+        } else {
+            tracing::warn!("no supported audio server or pactl found");
+            Box::new(linux::PwCliVirtualMic::new())
         }
     }
     #[cfg(target_os = "windows")]
