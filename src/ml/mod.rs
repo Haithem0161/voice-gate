@@ -7,4 +7,6 @@
 pub mod embedding;
 pub mod fbank;
 pub mod similarity;
+pub mod stft;
+pub mod tse;
 pub mod vad;

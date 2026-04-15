@@ -9,6 +9,8 @@ use crate::enrollment::profile::Profile;
 use crate::gate::audio_gate::{AudioGate, GateState};
 use crate::ml::embedding::{EcapaTdnn, EmbeddingWindow};
 use crate::ml::similarity::SpeakerVerifier;
+use crate::ml::stft::StftProcessor;
+use crate::ml::tse::TseModel;
 use crate::ml::vad::{SileroVad, VAD_CHUNK_SAMPLES};
 
 /// Max samples to keep in each waveform buffer (~1s at 48kHz).
@@ -53,6 +55,12 @@ pub struct PipelineProcessor {
     vad_threshold: f32,
     verify_threshold: f32,
     frame_count: u64,
+    // TSE (Phase 7): optional target speaker extraction.
+    tse_model: Option<TseModel>,
+    tse_stft: Option<StftProcessor>,
+    tse_blend: f32,
+    enrolled_embedding: Vec<f32>,
+    tse_error_count: u32,
 }
 
 impl PipelineProcessor {
@@ -62,16 +70,24 @@ impl PipelineProcessor {
         vad: SileroVad,
         ecapa: EcapaTdnn,
         status: Arc<PipelineStatus>,
+        tse_model: Option<TseModel>,
     ) -> anyhow::Result<Self> {
         let resampler = Resampler48to16::new()?;
         let crossfade_samples = config.gate.crossfade_samples(config.audio.sample_rate);
         let gate = AudioGate::new(config.gate.hold_frames, crossfade_samples);
         let anti_targets = profile.anti_targets.clone();
+        let enrolled_embedding = profile.embedding.clone();
         let verifier = SpeakerVerifier::new(
             profile.embedding,
             config.verification.threshold,
             config.verification.ema_alpha,
         );
+
+        let tse_stft = if tse_model.is_some() {
+            Some(StftProcessor::new())
+        } else {
+            None
+        };
 
         Ok(Self {
             resampler,
@@ -86,6 +102,11 @@ impl PipelineProcessor {
             vad_threshold: config.vad.threshold,
             verify_threshold: config.verification.threshold,
             frame_count: 0,
+            tse_model,
+            tse_stft,
+            tse_blend: config.tse.blend,
+            enrolled_embedding,
+            tse_error_count: 0,
         })
     }
 
@@ -179,7 +200,33 @@ impl PipelineProcessor {
             let _ = out_rms; // used after gate.process
         }
 
-        self.gate.process(frame, is_match);
+        // Apply gate or TSE extraction.
+        if let (Some(tse), Some(stft)) = (&mut self.tse_model, &mut self.tse_stft) {
+            if self.tse_error_count < 100 {
+                if is_match {
+                    // TSE path: extract target speaker's voice from the mixture.
+                    match Self::apply_tse(tse, stft, frame, &self.enrolled_embedding, self.tse_blend, &mut self.gate, is_match) {
+                        Ok(()) => {}
+                        Err(e) => {
+                            tracing::error!("TSE error, falling back to gate: {e}");
+                            self.tse_error_count += 1;
+                            self.gate.process(frame, is_match);
+                        }
+                    }
+                } else {
+                    // Not the enrolled speaker: silence (same as binary gate closed).
+                    frame.fill(0.0);
+                    tse.reset_state();
+                    self.gate.process(frame, is_match); // keep gate state machine in sync
+                }
+            } else {
+                // Too many TSE errors: fall back to binary gate permanently.
+                self.gate.process(frame, is_match);
+            }
+        } else {
+            // No TSE model: use binary gate (existing v1 behavior).
+            self.gate.process(frame, is_match);
+        }
 
         // Push output (gated) waveform samples for GUI display
         if let Ok(mut wf) = self.status.waveform_out.try_lock() {
@@ -206,6 +253,49 @@ impl PipelineProcessor {
         self.status
             .gate_state
             .store(self.gate.state().as_u8(), Ordering::Relaxed);
+
+        Ok(())
+    }
+
+    /// Apply TSE: STFT -> mask prediction -> iSTFT.
+    /// Modifies `frame` in-place with the extracted audio.
+    fn apply_tse(
+        tse: &mut TseModel,
+        stft: &mut StftProcessor,
+        frame: &mut [f32],
+        enrolled_embedding: &[f32],
+        blend: f32,
+        gate: &mut AudioGate,
+        is_match: bool,
+    ) -> anyhow::Result<()> {
+        let (magnitudes, phases, num_frames) = stft.analyze(frame);
+
+        let mask = tse.predict_mask(&magnitudes, num_frames, enrolled_embedding)?;
+
+        // Apply mask: element-wise multiply magnitude by mask.
+        let mut masked_mag = vec![0.0f32; magnitudes.len()];
+        for (i, (m, &mk)) in magnitudes.iter().zip(mask.iter()).enumerate() {
+            masked_mag[i] = m * mk;
+        }
+
+        let extracted = stft.synthesize(&masked_mag, &phases, num_frames);
+
+        if blend >= 1.0 {
+            // Pure TSE output.
+            let copy_len = frame.len().min(extracted.len());
+            frame[..copy_len].copy_from_slice(&extracted[..copy_len]);
+        } else if blend <= 0.0 {
+            // Pure binary gate (but TSE still ran for state continuity).
+            gate.process(frame, is_match);
+        } else {
+            // Blend: mix TSE output with binary-gated output.
+            let mut gated = frame.to_vec();
+            gate.process(&mut gated, is_match);
+            let copy_len = frame.len().min(extracted.len());
+            for i in 0..copy_len {
+                frame[i] = blend * extracted[i] + (1.0 - blend) * gated[i];
+            }
+        }
 
         Ok(())
     }

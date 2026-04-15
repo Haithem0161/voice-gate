@@ -14,6 +14,7 @@ pub struct Config {
     pub gate: GateConfig,
     pub enrollment: EnrollmentConfig,
     pub gui: GuiConfig,
+    pub tse: TseConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -66,6 +67,28 @@ pub struct EnrollmentConfig {
 pub struct GuiConfig {
     pub show_similarity_meter: bool,
     pub show_waveform: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TseConfig {
+    /// Whether target speaker extraction is enabled. When false, the
+    /// pipeline uses the binary gate (pass/silence) instead.
+    pub enabled: bool,
+    /// Path to the TSE ONNX model file.
+    pub model_path: String,
+    /// Blend factor between TSE output and binary gate output.
+    /// 0.0 = pure binary gate, 1.0 = pure TSE extraction.
+    pub blend: f32,
+}
+
+impl Default for TseConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model_path: "models/voicegate_tse.onnx".into(),
+            blend: 1.0,
+        }
+    }
 }
 
 impl Default for AudioConfig {
@@ -193,6 +216,11 @@ impl Config {
         if self.verification.ema_alpha <= 0.0 || self.verification.ema_alpha > 1.0 {
             return Err(VoiceGateError::Config(
                 "verification.ema_alpha must be in (0, 1]".into(),
+            ));
+        }
+        if self.tse.blend < 0.0 || self.tse.blend > 1.0 {
+            return Err(VoiceGateError::Config(
+                "tse.blend must be in [0.0, 1.0]".into(),
             ));
         }
         Ok(())

@@ -75,9 +75,31 @@ impl AppController {
         let vad = SileroVad::load(&silero_path)?;
         let ecapa = EcapaTdnn::load(&wespeaker_path)?;
 
+        // Load TSE model if enabled.
+        let tse_model = if config.tse.enabled {
+            match crate::resolve_model_path(&config.tse.model_path) {
+                Ok(tse_path) => match crate::ml::tse::TseModel::load(&tse_path) {
+                    Ok(tse) => {
+                        tracing::info!("TSE model loaded from {}", tse_path.display());
+                        Some(tse)
+                    }
+                    Err(e) => {
+                        tracing::warn!("TSE model failed to load, falling back to gate: {e}");
+                        None
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!("TSE model path not found, falling back to gate: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         self.status = Arc::new(PipelineStatus::default());
         let mut pipeline =
-            PipelineProcessor::new(&config, profile, vad, ecapa, self.status.clone())?;
+            PipelineProcessor::new(&config, profile, vad, ecapa, self.status.clone(), tse_model)?;
 
         let (input_prod, mut input_cons) = new_audio_ring(RING_CAPACITY_SAMPLES);
         let (mut output_prod, output_cons) = new_audio_ring(RING_CAPACITY_SAMPLES);

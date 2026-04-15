@@ -32,6 +32,7 @@ pub struct VoiceGateApp {
     hold_frames: u32,
     bypass_mode: usize,
     monitor_enabled: bool,
+    tse_enabled: bool,
 }
 
 fn apply_theme(ctx: &egui::Context) {
@@ -81,6 +82,7 @@ impl VoiceGateApp {
         let config = Config::load().unwrap_or_default();
         let threshold = config.verification.threshold;
         let hold_frames = config.gate.hold_frames;
+        let tse_enabled = config.tse.enabled;
         let controller = AppController::new(config);
 
         Self {
@@ -91,6 +93,7 @@ impl VoiceGateApp {
             hold_frames,
             bypass_mode: 0,
             monitor_enabled: false,
+            tse_enabled,
         }
     }
 
@@ -588,6 +591,34 @@ impl VoiceGateApp {
                         }
                         if self.monitor_enabled != prev {
                             self.controller.set_monitor(self.monitor_enabled);
+                        }
+
+                        ui.add_space(6.0);
+
+                        // TSE toggle
+                        let tse_prev = self.tse_enabled;
+                        let tse_fill = if self.tse_enabled {
+                            PRIMARY
+                        } else {
+                            LED_OFF
+                        };
+                        let tse_text = if self.tse_enabled {
+                            "TSE ON"
+                        } else {
+                            "TSE OFF"
+                        };
+                        let tse_btn =
+                            egui::Button::new(egui::RichText::new(tse_text).size(9.0).color(TEXT))
+                                .fill(tse_fill)
+                                .rounding(10.0)
+                                .min_size(egui::vec2(0.0, 18.0));
+                        if ui.add(tse_btn).clicked() {
+                            self.tse_enabled = !self.tse_enabled;
+                        }
+                        if self.tse_enabled != tse_prev {
+                            if let Ok(mut cfg) = self.controller.config.write() {
+                                cfg.tse.enabled = self.tse_enabled;
+                            }
                         }
                     });
                 });

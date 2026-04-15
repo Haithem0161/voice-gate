@@ -279,7 +279,7 @@ fn cmd_run_headless(
     let ecapa = EcapaTdnn::load(&wespeaker_path)?;
 
     let status = Arc::new(PipelineStatus::default());
-    let mut pipeline = PipelineProcessor::new(&config, profile, vad, ecapa, status.clone())?;
+    let mut pipeline = PipelineProcessor::new(&config, profile, vad, ecapa, status.clone(), None)?;
 
     // Start capture BEFORE creating the virtual mic nodes. PipeWire
     // auto-links new streams to available sources/sinks. If we create

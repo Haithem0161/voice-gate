@@ -112,7 +112,7 @@ fn build_pipeline(profile: Profile) -> (PipelineProcessor, Arc<PipelineStatus>) 
     let vad = SileroVad::load(&silero_path()).expect("silero");
     let ecapa = EcapaTdnn::load(&wespeaker_path()).expect("wespeaker");
     let pipeline =
-        PipelineProcessor::new(&config, profile, vad, ecapa, status.clone()).expect("pipeline");
+        PipelineProcessor::new(&config, profile, vad, ecapa, status.clone(), None).expect("pipeline");
     (pipeline, status)
 }
 

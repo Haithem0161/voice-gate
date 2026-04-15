@@ -4617,6 +4617,7 @@ dependencies = [
  "rfd",
  "ringbuf",
  "rubato",
+ "rustfft",
  "serde",
  "thiserror 2.0.18",
  "toml",
